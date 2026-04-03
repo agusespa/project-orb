@@ -1,0 +1,37 @@
+#!/bin/sh
+
+set -eu
+
+echo "> Running pre-commit hook..."
+
+if ! command -v git >/dev/null 2>&1; then
+    echo "ERROR: git is required"
+    exit 1
+fi
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+
+if [ -z "$staged_files" ]; then
+    echo ">> No staged Go files. Skipping Go checks."
+    exit 0
+fi
+
+echo ">> Running gofmt on staged Go files..."
+echo "$staged_files" | xargs gofmt -w
+
+if command -v goimports >/dev/null 2>&1; then
+    echo ">> Running goimports on staged Go files..."
+    echo "$staged_files" | xargs goimports -w
+else
+    echo ">> goimports not found. Skipping import normalization."
+fi
+
+echo "$staged_files" | xargs git add
+
+echo ">> Running repo lint checks..."
+make lint
+
+echo ">> Running repo tests..."
+make test
+
+echo ">> Pre-commit checks passed!"

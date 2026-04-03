@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -eu
+
+echo "> Running pre-push hook..."
+
+echo ">> Verifying module dependencies..."
+go mod verify
+
+echo ">> Running repo lint checks..."
+make lint
+
+echo ">> Running repo tests..."
+make test
+
+echo ">> Running race detection..."
+go test -race ./...
+
+echo ">> Building binary..."
+make build
+
+if command -v govulncheck >/dev/null 2>&1; then
+    echo ">> Running security audit..."
+    govulncheck ./...
+else
+    echo ">> govulncheck not found. Skipping security audit."
+fi
+
+echo ">> Pre-push checks passed!"
