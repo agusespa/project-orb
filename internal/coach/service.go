@@ -6,27 +6,30 @@ import (
 	"strings"
 )
 
-type summarizer func(context.Context, *Client, string, []Turn) (string, error)
+type summarizer func(context.Context, *Client, Mode, string, []Turn) (string, error)
 
 type Service struct {
 	client    *Client
+	mode      Mode
 	summarize summarizer
 }
 
-func NewService(client *Client) (*Service, error) {
+func NewService(client *Client, mode Mode) (*Service, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client cannot be nil")
 	}
 
 	return &Service{
 		client:    client,
+		mode:      mode,
 		summarize: updateConversationSummary,
 	}, nil
 }
 
-func newServiceWithSummarizer(client *Client, summarize summarizer) *Service {
+func newServiceWithSummarizer(client *Client, mode Mode, summarize summarizer) *Service {
 	return &Service{
 		client:    client,
+		mode:      mode,
 		summarize: summarize,
 	}
 }
@@ -43,7 +46,7 @@ func (s *Service) PrepareSession(ctx context.Context, session *SessionContext) e
 	overflowCount := len(session.Recent) - maxRecentTurns
 	overflowTurns := append([]Turn(nil), session.Recent[:overflowCount]...)
 
-	summary, err := s.summarize(ctx, s.client, session.Summary, overflowTurns)
+	summary, err := s.summarize(ctx, s.client, s.mode, session.Summary, overflowTurns)
 	if err != nil {
 		return err
 	}
@@ -62,7 +65,7 @@ func (s *Service) GenerateAnalysis(userMessage string, session SessionContext) (
 }
 
 func (s *Service) GenerateAnalysisWithContext(ctx context.Context, userMessage string, session SessionContext) (string, error) {
-	systemMessage, err := LoadSystemMessage()
+	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
 		return "", err
 	}
@@ -81,8 +84,25 @@ func (s *Service) GenerateAnalysisWithContext(ctx context.Context, userMessage s
 	return strings.TrimSpace(analysis), nil
 }
 
+func (s *Service) GenerateWelcomeWithContext(ctx context.Context, session SessionContext) (<-chan string, <-chan error, error) {
+	systemMessage, err := s.mode.SystemMessage()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	messages := buildConversationMessages(systemMessage, session)
+	messages = append(messages, chatMessage{Role: "user", Content: welcomeTaskPrompt})
+
+	tokenCh, errCh, err := s.client.StreamMessages(ctx, messages)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate welcome: %w", err)
+	}
+
+	return tokenCh, errCh, nil
+}
+
 func (s *Service) GenerateResponseWithContext(ctx context.Context, userMessage string, analysis string, session SessionContext) (<-chan string, <-chan error, error) {
-	systemMessage, err := LoadSystemMessage()
+	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
 		return nil, nil, err
 	}

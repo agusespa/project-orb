@@ -169,7 +169,11 @@ func (m model) renderableInputLines(width int) []string {
 	input := m.input
 
 	if strings.TrimSpace(input) == "" && !m.streaming {
-		return []string{"Type your message and press Enter"}
+		placeholder := "Type your message and press Enter"
+		if runeLen(placeholder) < availableWidth {
+			return []string{placeholder + inputCursor}
+		}
+		return []string{placeholder, inputCursor}
 	}
 
 	lines := wrapInputText(input, availableWidth)
@@ -184,7 +188,9 @@ func (m model) renderableInputLines(width int) []string {
 	lastLineIndex := len(lines) - 1
 	if runeLen(lines[lastLineIndex]) < availableWidth {
 		lines[lastLineIndex] += inputCursor
+		return lines
 	}
 
+	lines = append(lines, inputCursor)
 	return lines
 }

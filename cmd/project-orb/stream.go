@@ -19,7 +19,10 @@ type streamResult struct {
 
 type streamRunner interface {
 	Start(prompt string, session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
+	StartWelcome(session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
 }
+
+type runnerFactory func(mode coach.Mode) (streamRunner, error)
 
 type coachRunner struct {
 	service *coach.Service
@@ -35,6 +38,10 @@ func newCoachRunner(service *coach.Service) streamRunner {
 
 func (r coachRunner) Start(prompt string, session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	return startStreaming(prompt, session, r.service)
+}
+
+func (r coachRunner) StartWelcome(session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+	return startWelcomeStreaming(session, r.service)
 }
 
 func spinnerTick() tea.Cmd {
@@ -109,6 +116,64 @@ func startStreaming(prompt string, session coach.SessionContext, service *coach.
 		}
 
 		responseCh, responseErrCh, err := service.GenerateResponseWithContext(ctx, prompt, analysis, session)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				doneCh <- streamResult{session: session, canceled: true}
+				return
+			}
+			errCh <- err
+			return
+		}
+
+		for responseCh != nil || responseErrCh != nil {
+			select {
+			case <-ctx.Done():
+				doneCh <- streamResult{session: session, canceled: true}
+				return
+			case token, ok := <-responseCh:
+				if !ok {
+					responseCh = nil
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					doneCh <- streamResult{session: session, canceled: true}
+					return
+				case tokenCh <- token:
+				}
+			case err, ok := <-responseErrCh:
+				if !ok {
+					responseErrCh = nil
+					continue
+				}
+				errCh <- err
+				return
+			}
+		}
+
+		doneCh <- streamResult{session: session}
+	}()
+
+	return tea.Batch(waitForToken(tokenCh), waitForErr(errCh), waitForStreamResult(doneCh)), tokenCh, errCh, doneCh, cancel
+}
+
+func startWelcomeStreaming(session coach.SessionContext, service *coach.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tokenCh := make(chan string)
+	errCh := make(chan error, 1)
+	doneCh := make(chan streamResult, 1)
+
+	go func() {
+		defer close(tokenCh)
+		defer close(errCh)
+		defer close(doneCh)
+
+		if service == nil {
+			errCh <- errRunnerNotConfigured
+			return
+		}
+
+		responseCh, responseErrCh, err := service.GenerateWelcomeWithContext(ctx, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				doneCh <- streamResult{session: session, canceled: true}

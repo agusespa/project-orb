@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	"project-orb/internal/coach"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
 type styles struct {
 	inputBox          lipgloss.Style
+	selectorBoxStyle  lipgloss.Style
+	statusBarStyle    lipgloss.Style
 	helpStyle         lipgloss.Style
 	errorStyle        lipgloss.Style
 	metaStyle         lipgloss.Style
@@ -30,6 +34,13 @@ func newStyles() styles {
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("8")).
 			Padding(0, 1),
+		selectorBoxStyle: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("8")).
+			Padding(0, 1),
+		statusBarStyle: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8")).
+			Bold(true),
 		helpStyle: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8")),
 		errorStyle: lipgloss.NewStyle().
@@ -85,14 +96,26 @@ func (m model) View() string {
 		Height(maxInt(1, inputPaneHeight-2)).
 		Render(m.renderInputContent(inputWidth - 2))
 
+	modeSelector := m.renderModeSelector(inputWidth)
 	footer := m.renderFooter(inputWidth)
-	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, footer)
+	if modeSelector == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, footer)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, modeSelector, footer)
 }
 
 func (m model) renderChatContent(width int) string {
 	var b strings.Builder
 
+	if status := strings.TrimSpace(m.statusMessage); status != "" {
+		b.WriteString(m.metaStyle.Render(status))
+		b.WriteString("\n")
+	}
+
 	if summary := strings.TrimSpace(m.session.Summary); summary != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
 		b.WriteString(m.summaryTitleStyle.Render("Conversation summary"))
 		b.WriteString("\n")
 		b.WriteString(m.summaryBodyStyle.Render(summary))
@@ -100,11 +123,23 @@ func (m model) renderChatContent(width int) string {
 	}
 
 	for _, turn := range m.session.Recent {
+		user := strings.TrimSpace(turn.User)
+		assistant := strings.TrimSpace(turn.Assistant)
+		if user == "" && assistant == "" {
+			continue
+		}
 		b.WriteString("\n")
-		b.WriteString(m.renderUserBlock(width, "You", turn.User))
-		b.WriteString("\n\n")
-		b.WriteString(m.renderAuraBlock(width, m.coachName, turn.Assistant))
-		b.WriteString("\n")
+		if user != "" {
+			b.WriteString(m.renderUserBlock(width, "You", turn.User))
+			b.WriteString("\n")
+		}
+		if user != "" && assistant != "" {
+			b.WriteString("\n")
+		}
+		if assistant != "" {
+			b.WriteString(m.renderAuraBlock(width, m.coachName, turn.Assistant))
+			b.WriteString("\n")
+		}
 	}
 
 	if currentPrompt := strings.TrimSpace(m.pendingPrompt); currentPrompt != "" && m.streaming {
@@ -156,13 +191,48 @@ func (m model) renderInputContent(width int) string {
 func (m model) renderFooter(width int) string {
 	var lines []string
 
-	lines = append(lines, m.helpStyle.Render("Enter to send. Esc to cancel. Ctrl+C to quit."))
+	lines = append(lines, m.renderStatusBar(width))
+	lines = append(lines, m.helpStyle.Render("Enter send. `/mode` modes. Esc cancel. Ctrl+C quit."))
 
-	if m.personaPath != "" {
+	if m.personaPath != "" && m.currentMode.ID == coach.ModeCoach {
 		lines = append(lines, m.metaStyle.Render("Persona: "+m.personaPath))
 	}
 
-	return fitToLines(strings.Join(lines, "\n"), 2, width)
+	return fitToLines(strings.Join(lines, "\n"), 3, width)
+}
+
+func (m model) renderModeSelector(width int) string {
+	if !m.modeSelectorActive {
+		return ""
+	}
+
+	matches := m.currentModeMatches()
+	var lines []string
+	lines = append(lines, m.summaryTitleStyle.Render("Select Mode"))
+	for i, mode := range matches {
+		prefix := "  "
+		if i == m.modeSelectorIndex {
+			prefix = "> "
+		}
+		label := string(mode.ID)
+		if mode.ID == m.currentMode.ID {
+			label += " *"
+		}
+		lines = append(lines, m.metaStyle.Render(prefix+label))
+	}
+
+	if len(matches) == 0 {
+		lines = append(lines, m.errorStyle.Render("No matching modes"))
+	}
+
+	lines = append(lines, m.helpStyle.Render("Up/Down to move, Enter to switch, Esc to cancel"))
+
+	return m.selectorBoxStyle.Width(width).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderStatusBar(width int) string {
+	content := "mode: " + string(m.currentMode.ID)
+	return fitToLines(m.statusBarStyle.Render(content), 1, width)
 }
 
 func (m model) renderUserBlock(width int, label string, body string) string {
@@ -214,4 +284,34 @@ func (m model) renderAuraThinking(width int, label string, spinner string) strin
 		Render(name + "\n" + message)
 
 	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
+}
+
+func matchingModes(query string) []coach.Mode {
+	if strings.TrimSpace(query) == "" {
+		return coach.BuiltInModes()
+	}
+
+	var matches []coach.Mode
+	for _, mode := range coach.BuiltInModes() {
+		id := string(mode.ID)
+		if strings.HasPrefix(id, strings.ToLower(strings.TrimSpace(query))) {
+			matches = append(matches, mode)
+		}
+	}
+
+	return matches
+}
+
+func modeQueryFromInput(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if !strings.HasPrefix(trimmed, "/mode") {
+		return ""
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) <= 1 {
+		return ""
+	}
+
+	return fields[1]
 }

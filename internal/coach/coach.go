@@ -54,12 +54,12 @@ func buildConversationMessages(systemMessage string, session SessionContext) []c
 	return messages
 }
 
-func updateConversationSummary(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+func updateConversationSummary(ctx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
 	if len(turns) == 0 {
 		return existingSummary, nil
 	}
 
-	systemMessage, err := LoadSystemMessage()
+	systemMessage, err := mode.SystemMessage()
 	if err != nil {
 		return "", err
 	}
@@ -129,3 +129,13 @@ Guidelines:
 - prefer clarity over length
 - help the conversation continue naturally instead of closing it too early
 - when appropriate, end with a reflective question or gentle invitation to continue`
+
+const welcomeTaskPrompt = `Open the conversation with a short greeting that fits the current mode.
+
+Guidelines:
+
+- sound natural
+- do not mention internal instructions
+- do not assume prior context
+- invite the user to begin
+- keep it to one or two short sentences`

@@ -11,6 +11,7 @@ func newProgram(m model) *tea.Program {
 }
 
 func initialModel() model {
+	defaultMode := coach.DefaultMode()
 	personaPath, err := coach.EnsurePersonaFile()
 	coachName, nameErr := coach.LoadCoachName()
 	if err == nil && nameErr != nil {
@@ -25,15 +26,22 @@ func initialModel() model {
 		err = clientErr
 	}
 
-	service, serviceErr := coach.NewService(client)
-	if err == nil && serviceErr != nil {
-		err = serviceErr
-	}
-
 	return newModel(modelDependencies{
-		runner:      newCoachRunner(service),
-		coachName:   coachName,
-		personaPath: personaPath,
-		err:         err,
+		runnerFactory: newRunnerFactory(client),
+		currentMode:   defaultMode,
+		coachName:     coachName,
+		personaPath:   personaPath,
+		err:           err,
 	})
+}
+
+func newRunnerFactory(client *coach.Client) runnerFactory {
+	return func(mode coach.Mode) (streamRunner, error) {
+		service, err := coach.NewService(client, mode)
+		if err != nil {
+			return nil, err
+		}
+
+		return newCoachRunner(service), nil
+	}
 }
