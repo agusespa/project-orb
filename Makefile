@@ -1,5 +1,5 @@
 PROJECT_NAME := project-orb
-MAIN_PACKAGE := .
+MAIN_PACKAGE := ./cmd/project-orb
 BUILD_DIR := bin
 RELEASE_DIR := release
 BINARY_NAME := $(BUILD_DIR)/$(PROJECT_NAME)
@@ -20,7 +20,7 @@ tidy:
 
 fmt:
 	@echo "Formatting Go files..."
-	gofmt -w *.go
+	gofmt -w ./cmd ./internal
 	@echo "Formatting complete."
 
 lint:
