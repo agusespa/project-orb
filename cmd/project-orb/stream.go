@@ -51,12 +51,6 @@ func spinnerTick() tea.Cmd {
 	})
 }
 
-func clockTick() tea.Cmd {
-	return tea.Tick(1*time.Second, func(time.Time) tea.Msg {
-		return clockTickMsg{}
-	})
-}
-
 func waitForToken(ch <-chan string) tea.Cmd {
 	return func() tea.Msg {
 		token, ok := <-ch

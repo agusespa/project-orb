@@ -106,9 +106,6 @@ func NewStyles(id agent.ModeID) Styles {
 		SelectorBoxStyle: NeutralSelectorBoxStyle,
 		StatusBarStyle: lipgloss.NewStyle().
 			Foreground(t.StatusFg).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(t.Border).
 			Bold(true),
 		HelpStyle: NeutralHelpStyle,
 		ErrorStyle: lipgloss.NewStyle().

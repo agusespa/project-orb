@@ -34,7 +34,7 @@ func BuiltInModes() []Mode {
 	return []Mode{
 		{
 			ID:           ModeCoach,
-			Name:         "Agent",
+			Name:         "Coach",
 			Description:  "Guidance for everyday reflection, decisions, and next steps.",
 			Instructions: agentInstructions,
 		},

@@ -8,7 +8,7 @@ import (
 func TestDefaultModeIsCoach(t *testing.T) {
 	got := DefaultMode()
 	if got.ID != ModeCoach {
-		t.Fatalf("expected agent default mode, got %q", got.ID)
+		t.Fatalf("expected coach default mode, got %q", got.ID)
 	}
 }
 

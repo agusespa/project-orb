@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 
 	"project-orb/internal/agent"
 	"project-orb/internal/ui"
@@ -23,14 +22,10 @@ func (m model) View() string {
 
 	contentWidth := max(1, m.width)
 
-	header := m.renderHeader(contentWidth)
-	headerHeight := renderedLineCount(header)
+	statusBar := m.renderStatusBar(contentWidth)
+	statusBarHeight := renderedLineCount(statusBar)
 
-	footerMaxLines := max(0, m.height-2-headerHeight)
-	footer := m.renderFooterWithLimit(contentWidth, footerMaxLines)
-	footerHeight := renderedLineCount(footer)
-
-	remainingHeight := max(2, m.height-footerHeight-headerHeight)
+	remainingHeight := max(2, m.height-statusBarHeight)
 	desiredInputPaneHeight := m.inputPaneHeight(contentWidth - 2)
 	maxInputHeight := max(3, remainingHeight/3)
 	inputPaneHeight := min(max(desiredInputPaneHeight, 1), max(1, min(maxInputHeight, remainingHeight-1)))
@@ -55,9 +50,9 @@ func (m model) View() string {
 		Render(m.renderInputContent(contentWidth-2, max(1, inputPaneHeight-2)))
 
 	if modeSelector == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, header, chatPane, inputPane, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, statusBar)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, chatPane, inputPane, modeSelector, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, modeSelector, statusBar)
 }
 
 func (m model) renderChatContent(width int, maxLines int) string {
@@ -144,18 +139,6 @@ func (m model) renderInputContent(width int, maxLines int) string {
 	return ui.FitToLines(b.String(), max(1, maxLines), width)
 }
 
-func (m model) renderFooterWithLimit(width int, maxLines int) string {
-	if maxLines <= 0 {
-		return ""
-	}
-
-	var lines []string
-
-	lines = append(lines, ui.NeutralHelpStyle.Render("Press Enter to send, Esc to cancel. '/' to enter commands. Ctrl+C to quit."))
-
-	return ui.FitToLines(strings.Join(lines, "\n"), maxLines, width)
-}
-
 func (m model) renderModeSelector(width int) string {
 	// Each mode takes 1 line, plus title line
 	return m.renderModeSelectorWithLimit(width, max(1, len(agent.BuiltInModes())+2))
@@ -224,50 +207,22 @@ func (m model) renderModeSelectorWithLimit(width int, maxLines int) string {
 	return m.selectorBoxStyle.Width(width).Render(content)
 }
 
-func (m model) renderHeader(width int) string {
+func (m model) renderStatusBar(width int) string {
 	if width <= 0 {
 		return ""
 	}
 
-	centerText := m.currentMode.Name + " Mode"
+	var parts []string
 
-	var rightText string
-	if !m.sessionStart.IsZero() {
-		elapsed := time.Since(m.sessionStart).Round(time.Second)
-		hours := int(elapsed.Hours())
-		minutes := int(elapsed.Minutes()) % 60
-		seconds := int(elapsed.Seconds()) % 60
+	// Mode name (colored)
+	theme := ui.ThemeForMode(m.currentMode.ID)
+	modeStyle := lipgloss.NewStyle().Foreground(theme.StatusFg).Bold(true)
+	parts = append(parts, modeStyle.Render(m.currentMode.Name+" Mode"))
 
-		// Add context usage indicator
-		contextIndicator := m.renderContextIndicator()
-		rightText = contextIndicator + "  " + ui.NeutralMetaStyle.Render(fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds))
-	}
-
-	// Build a three-section layout: empty | center | right
-	// Each section shares equal width so center is visually centered.
-	sectionWidth := width / 3
-	remainder := width - sectionWidth*3
-
-	left := lipgloss.NewStyle().Width(sectionWidth).Render("")
-	center := lipgloss.NewStyle().
-		Width(sectionWidth + remainder).
-		Align(lipgloss.Center).
-		Bold(true).
-		Render(ui.FitToLines(centerText, 1, sectionWidth+remainder))
-	right := lipgloss.NewStyle().
-		Width(sectionWidth).
-		Align(lipgloss.Right).
-		Render(rightText)
-
-	row := lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
-	return m.statusBarStyle.Width(width).Render(row)
-}
-
-func (m model) renderContextIndicator() string {
+	// Context usage (gray label, colored percentage)
 	percent := m.session.ContextUsagePercent()
 
 	var color lipgloss.Color
-
 	switch {
 	case percent < 60:
 		color = lipgloss.Color("10") // Green
@@ -281,8 +236,17 @@ func (m model) renderContextIndicator() string {
 
 	grayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	percentStyle := lipgloss.NewStyle().Foreground(color)
+	contextInfo := grayStyle.Render("ctx ") + percentStyle.Render(fmt.Sprintf("%.0f%%", percent))
+	parts = append(parts, contextInfo)
 
-	return grayStyle.Render("ctx ") + percentStyle.Render(fmt.Sprintf("%.0f%%", percent))
+	// Help hints
+	hints := ui.NeutralHelpStyle.Render("⏎ send · esc cancel · / cmd · ^C quit")
+	parts = append(parts, hints)
+
+	// Join with pipe separator
+	content := strings.Join(parts, " | ")
+
+	return m.statusBarStyle.Width(width).Render(content)
 }
 
 func renderedLineCount(s string) int {

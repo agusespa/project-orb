@@ -34,7 +34,7 @@ fmt:
 
 lint:
 	@echo "Running lint checks..."
-	@golangci-lint run ./... 2>&1 | grep -v "^$" || true
+	@golangci-lint run ./... || true
 	@echo "Lint checks complete."
 
 test:

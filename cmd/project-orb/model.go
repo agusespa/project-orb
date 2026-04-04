@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"project-orb/internal/agent"
 	"project-orb/internal/ui"
@@ -21,7 +20,6 @@ type streamErrMsg struct {
 }
 
 type spinnerTickMsg struct{}
-type clockTickMsg struct{}
 type startWelcomeMsg struct{}
 
 type streamDoneMsg struct {
@@ -67,7 +65,6 @@ type model struct {
 	doneCh               <-chan streamResult
 	runner               streamRunner
 	runnerFactory        runnerFactory
-	sessionStart         time.Time
 	inputBox             lipgloss.Style
 	selectorBoxStyle     lipgloss.Style
 	statusBarStyle       lipgloss.Style
@@ -130,11 +127,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
-	case clockTickMsg:
-		if m.sessionStart.IsZero() {
-			return m, nil
-		}
-		return m, clockTick()
 	case spinnerTickMsg:
 		if !m.streaming {
 			return m, nil
@@ -287,23 +279,13 @@ func (m model) startPrompt() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	startClock := m.sessionStart.IsZero()
-	if startClock {
-		m.sessionStart = time.Now()
-	}
-
 	cmd, tokenCh, errCh, doneCh, cancel := runner.Start(prompt, m.session)
 	m.tokenCh = tokenCh
 	m.errCh = errCh
 	m.doneCh = doneCh
 	m.cancelCurrent = cancel
 
-	cmds := []tea.Cmd{cmd, spinnerTick()}
-	if startClock {
-		cmds = append(cmds, clockTick())
-	}
-
-	return m, tea.Batch(cmds...)
+	return m, tea.Batch(cmd, spinnerTick())
 }
 
 func (m model) startWelcome() (tea.Model, tea.Cmd) {
@@ -325,7 +307,6 @@ func (m model) startWelcome() (tea.Model, tea.Cmd) {
 	m.spinnerFrame = 0
 	m.pendingPrompt = ""
 	m.output = ""
-	m.sessionStart = time.Now()
 
 	cmd, tokenCh, errCh, doneCh, cancel := runner.StartWelcome(m.session)
 	m.tokenCh = tokenCh
@@ -333,7 +314,7 @@ func (m model) startWelcome() (tea.Model, tea.Cmd) {
 	m.doneCh = doneCh
 	m.cancelCurrent = cancel
 
-	return m, tea.Batch(cmd, spinnerTick(), clockTick())
+	return m, tea.Batch(cmd, spinnerTick())
 }
 
 func (m model) ensureRunner() (streamRunner, error) {
@@ -402,7 +383,6 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	if mode.ID == m.currentMode.ID {
 		m.modeSelectorActive = false
 		m.input = ""
-		m.statusMessage = fmt.Sprintf("Already in %s mode.", mode.Name)
 		return m, nil
 	}
 
@@ -431,7 +411,6 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	m.errCh = nil
 	m.doneCh = nil
 	m.cancelCurrent = nil
-	m.sessionStart = time.Time{}
 	m.statusMessage = fmt.Sprintf("Switched to %s mode. Started a fresh conversation.", mode.Name)
 	slog.Info("Switched mode", "mode", mode.Name, "source", "User")
 
