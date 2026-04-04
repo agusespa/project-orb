@@ -15,12 +15,12 @@ func newProgram(m model, ctx context.Context) *tea.Program {
 func initialModel() model {
 	defaultMode := agent.DefaultMode()
 	personaPath, err := agent.EnsurePersonaFile()
-	coachName, nameErr := agent.LoadCoachName()
+	agentName, nameErr := agent.LoadAgentName()
 	if err == nil && nameErr != nil {
 		err = nameErr
 	}
-	if coachName == "" {
-		coachName = "Coach"
+	if agentName == "" {
+		agentName = "Agent"
 	}
 
 	client, clientErr := agent.NewClient(agent.DefaultClientConfig())
@@ -31,7 +31,7 @@ func initialModel() model {
 	return newModel(modelDependencies{
 		runnerFactory: newRunnerFactory(client),
 		currentMode:   defaultMode,
-		coachName:     coachName,
+		agentName:     agentName,
 		personaPath:   personaPath,
 		err:           err,
 	})

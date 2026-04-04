@@ -540,7 +540,7 @@ func TestEnsurePersonaFileCreatesDefaultPersona(t *testing.T) {
 	}
 }
 
-func TestExtractCoachName(t *testing.T) {
+func TestExtractAgentName(t *testing.T) {
 	tests := []struct {
 		name    string
 		persona string
@@ -549,7 +549,7 @@ func TestExtractCoachName(t *testing.T) {
 		{
 			name: "name field",
 			persona: `Name: Sage
-You are a calm coach.`,
+You are a calm agent.`,
 			want: "Sage",
 		},
 		{
@@ -561,7 +561,7 @@ You are a calm coach.`,
 		{
 			name: "your name is",
 			persona: `Your name is Rowan.
-You are a practical coach.`,
+You are a practical agent.`,
 			want: "Rowan",
 		},
 		{
@@ -579,8 +579,8 @@ Help me think clearly.`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ExtractCoachName(tt.persona); got != tt.want {
-				t.Fatalf("ExtractCoachName() = %q, want %q", got, tt.want)
+			if got := ExtractAgentName(tt.persona); got != tt.want {
+				t.Fatalf("ExtractAgentName() = %q, want %q", got, tt.want)
 			}
 		})
 	}

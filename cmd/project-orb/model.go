@@ -36,7 +36,7 @@ type doneChannelClosedMsg struct{}
 type modelDependencies struct {
 	runnerFactory runnerFactory
 	currentMode   agent.Mode
-	coachName     string
+	agentName     string
 	personaPath   string
 	err           error
 	statusMessage string
@@ -55,7 +55,7 @@ type model struct {
 	spinnerFrame         int
 	session              agent.SessionContext
 	currentMode          agent.Mode
-	coachName            string
+	agentName            string
 	personaPath          string
 	streaming            bool
 	completed            bool
@@ -77,17 +77,17 @@ type model struct {
 	summaryTitleStyle    lipgloss.Style
 	summaryBodyStyle     lipgloss.Style
 	userNameStyle        lipgloss.Style
-	coachNameStyle       lipgloss.Style
+	agentNameStyle       lipgloss.Style
 	userBodyStyle        lipgloss.Style
-	coachBodyStyle       lipgloss.Style
+	agentBodyStyle       lipgloss.Style
 }
 
 func newModel(deps modelDependencies) model {
 	if deps.currentMode.ID == "" {
 		deps.currentMode = agent.DefaultMode()
 	}
-	if deps.coachName == "" {
-		deps.coachName = "Coach"
+	if deps.agentName == "" {
+		deps.agentName = "Agent"
 	}
 
 	styles := ui.NewStyles(deps.currentMode.ID)
@@ -96,7 +96,7 @@ func newModel(deps modelDependencies) model {
 		statusMessage:     deps.statusMessage,
 		currentMode:       deps.currentMode,
 		runnerFactory:     deps.runnerFactory,
-		coachName:         deps.coachName,
+		agentName:         deps.agentName,
 		personaPath:       deps.personaPath,
 		err:               deps.err,
 		inputBox:          styles.InputBox,
@@ -108,9 +108,9 @@ func newModel(deps modelDependencies) model {
 		summaryTitleStyle: styles.SummaryTitleStyle,
 		summaryBodyStyle:  styles.SummaryBodyStyle,
 		userNameStyle:     styles.UserNameStyle,
-		coachNameStyle:    styles.CoachNameStyle,
+		agentNameStyle:    styles.CoachNameStyle,
 		userBodyStyle:     styles.UserBodyStyle,
-		coachBodyStyle:    styles.CoachBodyStyle,
+		agentBodyStyle:    styles.CoachBodyStyle,
 	}
 }
 
@@ -445,9 +445,9 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	m.summaryTitleStyle = s.SummaryTitleStyle
 	m.summaryBodyStyle = s.SummaryBodyStyle
 	m.userNameStyle = s.UserNameStyle
-	m.coachNameStyle = s.CoachNameStyle
+	m.agentNameStyle = s.CoachNameStyle
 	m.userBodyStyle = s.UserBodyStyle
-	m.coachBodyStyle = s.CoachBodyStyle
+	m.agentBodyStyle = s.CoachBodyStyle
 
 	return m, tea.Cmd(func() tea.Msg { return startWelcomeMsg{} })
 }

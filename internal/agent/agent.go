@@ -74,7 +74,7 @@ func MaxTotalWords() int {
 }
 
 func buildResponseContext(analysis string) string {
-	return "Coaching analysis:\n" + strings.TrimSpace(analysis)
+	return "Analysis:\n" + strings.TrimSpace(analysis)
 }
 
 func buildConversationMessages(systemMessage string, session SessionContext) []chatMessage {

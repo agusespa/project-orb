@@ -121,20 +121,20 @@ func LoadPersona() (string, error) {
 	return string(persona), nil
 }
 
-func LoadCoachName() (string, error) {
+func LoadAgentName() (string, error) {
 	persona, err := LoadPersona()
 	if err != nil {
 		return "", err
 	}
 
-	if name := ExtractCoachName(persona); name != "" {
+	if name := ExtractAgentName(persona); name != "" {
 		return name, nil
 	}
 
-	return "Coach", nil
+	return "Agent", nil
 }
 
-func ExtractCoachName(persona string) string {
+func ExtractAgentName(persona string) string {
 	trimmed := strings.TrimSpace(persona)
 	for _, pattern := range personaNamePatterns {
 		match := pattern.FindStringSubmatch(trimmed)
@@ -310,4 +310,3 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 
 	return tokenCh, errCh, nil
 }
-

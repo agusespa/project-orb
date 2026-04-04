@@ -245,7 +245,7 @@ func TestModeCommandShowsAvailableModes(t *testing.T) {
 		t.Fatal("expected mode selector to become active")
 	}
 	if got.currentMode.ID != agent.ModeCoach {
-		t.Fatalf("expected current mode to remain coach, got %q", got.currentMode.ID)
+		t.Fatalf("expected current mode to remain agent, got %q", got.currentMode.ID)
 	}
 }
 
@@ -329,8 +329,8 @@ func TestModeCommandSwitchesModeAndResetsSession(t *testing.T) {
 	if got.currentMode.ID != agent.ModeAnalyst {
 		t.Fatalf("expected analyst mode, got %q", got.currentMode.ID)
 	}
-	if got.coachName != "Coach" {
-		t.Fatalf("expected stable coach name, got %q", got.coachName)
+	if got.agentName != "Agent" {
+		t.Fatalf("expected stable agent name, got %q", got.agentName)
 	}
 	if got.session.Summary != "" || len(got.session.Recent) != 0 {
 		t.Fatal("expected fresh session after mode switch")
@@ -363,7 +363,7 @@ func TestModeCommandRejectsUnknownMode(t *testing.T) {
 		t.Fatal("expected error for unknown mode")
 	}
 	if got.currentMode.ID != agent.ModeCoach {
-		t.Fatalf("expected mode to remain coach, got %q", got.currentMode.ID)
+		t.Fatalf("expected mode to remain agent, got %q", got.currentMode.ID)
 	}
 }
 
@@ -449,7 +449,7 @@ func TestRenderHeaderShowsCurrentMode(t *testing.T) {
 	m := testModel()
 
 	got := m.renderHeader(80)
-	if !strings.Contains(got, "Coach Mode") {
+	if !strings.Contains(got, "Agent Mode") {
 		t.Fatalf("expected header to show current mode, got %q", got)
 	}
 }
@@ -814,6 +814,6 @@ func testModel() model {
 			}, nil
 		},
 		currentMode: agent.DefaultMode(),
-		coachName:   "Coach",
+		agentName:   "Agent",
 	})
 }

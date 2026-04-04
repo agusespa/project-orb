@@ -93,7 +93,7 @@ func (m model) renderChatContent(width int, maxLines int) string {
 			b.WriteString("\n\n")
 		}
 		if assistant != "" {
-			b.WriteString(m.renderCoachBlock(width, m.coachName, turn.Assistant))
+			b.WriteString(m.renderAgentBlock(width, m.agentName, turn.Assistant))
 			b.WriteString("\n")
 		}
 	}
@@ -114,11 +114,11 @@ func (m model) renderChatContent(width int, maxLines int) string {
 	if currentOutput != "" || m.streaming {
 		b.WriteString("\n\n")
 		if m.streaming && m.waitingForFirstToken {
-			b.WriteString(m.renderCoachThinking(width, m.coachName, thinkingFrames[m.spinnerFrame]))
+			b.WriteString(m.renderAgentThinking(width, m.agentName, thinkingFrames[m.spinnerFrame]))
 		} else if currentOutput == "" {
-			b.WriteString(m.renderCoachBlock(width, m.coachName, " "))
+			b.WriteString(m.renderAgentBlock(width, m.agentName, " "))
 		} else {
-			b.WriteString(m.renderCoachBlock(width, m.coachName, currentOutput))
+			b.WriteString(m.renderAgentBlock(width, m.agentName, currentOutput))
 		}
 	}
 
@@ -265,28 +265,24 @@ func (m model) renderHeader(width int) string {
 
 func (m model) renderContextIndicator() string {
 	percent := m.session.ContextUsagePercent()
-	totalWords := m.session.TotalWordCount()
 
-	var icon string
 	var color lipgloss.Color
 
 	switch {
-	case percent < 50:
-		icon = "●"
+	case percent < 60:
 		color = lipgloss.Color("10") // Green
-	case percent < 80:
-		icon = "●"
+	case percent < 75:
 		color = lipgloss.Color("11") // Yellow
-	case percent < 95:
-		icon = "●"
+	case percent < 85:
 		color = lipgloss.Color("214") // Orange
 	default:
-		icon = "●"
 		color = lipgloss.Color("9") // Red
 	}
 
-	style := lipgloss.NewStyle().Foreground(color)
-	return style.Render(fmt.Sprintf("%s %d", icon, totalWords))
+	grayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	percentStyle := lipgloss.NewStyle().Foreground(color)
+
+	return grayStyle.Render("ctx ") + percentStyle.Render(fmt.Sprintf("%.0f%%", percent))
 }
 
 func renderedLineCount(s string) int {
@@ -314,10 +310,10 @@ func (m model) renderUserBlock(width int, label string, body string) string {
 	return lipgloss.PlaceHorizontal(width, lipgloss.Right, bubble)
 }
 
-func (m model) renderCoachBlock(width int, label string, body string) string {
+func (m model) renderAgentBlock(width int, label string, body string) string {
 	contentWidth := ui.MessageBlockWidth(width, 0.82)
-	name := m.renderSpeakerName(m.coachNameStyle, label)
-	message := m.coachBodyStyle.Render(
+	name := m.renderSpeakerName(m.agentNameStyle, label)
+	message := m.agentBodyStyle.Render(
 		lipgloss.NewStyle().
 			Width(contentWidth).
 			Align(lipgloss.Left).
@@ -331,10 +327,10 @@ func (m model) renderCoachBlock(width int, label string, body string) string {
 	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
 }
 
-func (m model) renderCoachThinking(width int, label string, frame int) string {
+func (m model) renderAgentThinking(width int, label string, frame int) string {
 	contentWidth := ui.MessageBlockWidth(width, 0.82)
-	name := m.renderSpeakerName(m.coachNameStyle, label)
-	message := m.coachBodyStyle.Render(
+	name := m.renderSpeakerName(m.agentNameStyle, label)
+	message := m.agentBodyStyle.Render(
 		lipgloss.NewStyle().
 			Width(contentWidth).
 			Align(lipgloss.Left).
