@@ -50,11 +50,13 @@ func (m model) View() string {
 		Width(m.width).
 		Render(m.renderInputContent())
 
-	if modeSelector == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, statusBar)
+	panes := []string{chatPane, inputPane}
+	if modeSelector != "" {
+		panes = append(panes, modeSelector)
 	}
+	panes = append(panes, statusBar)
 
-	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, modeSelector, statusBar)
+	return lipgloss.JoinVertical(lipgloss.Left, panes...)
 }
 
 func (m model) renderChatContent(width int, maxLines int) string {
@@ -73,36 +75,27 @@ func (m model) renderChatContent(width int, maxLines int) string {
 	}
 
 	for _, turn := range m.session.Recent {
-		user := strings.TrimSpace(turn.User)
-		assistant := strings.TrimSpace(turn.Assistant)
-		if user == "" && assistant == "" {
+		if strings.TrimSpace(turn.User) == "" && strings.TrimSpace(turn.Assistant) == "" {
 			continue
 		}
-		if user != "" {
-			blocks = append(blocks, m.renderUserBlock(width, "You", turn.User))
+		if strings.TrimSpace(turn.User) != "" {
+			blocks = append(blocks, renderUserBlock(width, m.userNameStyle, m.userBodyStyle, "You", turn.User))
 		}
-		if assistant != "" {
-			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, turn.Assistant))
+		if strings.TrimSpace(turn.Assistant) != "" {
+			blocks = append(blocks, renderAgentBlock(width, m.agentNameStyle, m.agentBodyStyle, m.agentName, turn.Assistant))
 		}
 	}
 
-	if currentPrompt := strings.TrimSpace(m.pendingPrompt); currentPrompt != "" && m.streaming {
-		blocks = append(blocks, m.renderUserBlock(width, "You", currentPrompt))
+	if strings.TrimSpace(m.pendingPrompt) != "" && m.streaming {
+		blocks = append(blocks, renderUserBlock(width, m.userNameStyle, m.userBodyStyle, "You", m.pendingPrompt))
 	}
 
 	if m.err != nil {
 		blocks = append(blocks, m.errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 	}
 
-	currentOutput := strings.TrimSpace(m.output)
-	if currentOutput != "" || m.streaming {
-		if m.streaming && m.waitingForFirstToken {
-			blocks = append(blocks, m.renderAgentThinking(width, m.agentName, m.spinnerFrame))
-		} else if currentOutput == "" {
-			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, " "))
-		} else {
-			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, currentOutput))
-		}
+	if strings.TrimSpace(m.output) != "" || m.streaming {
+		blocks = append(blocks, m.renderCurrentAgentOutput(width))
 	}
 
 	if len(blocks) == 0 {
@@ -110,14 +103,27 @@ func (m model) renderChatContent(width int, maxLines int) string {
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, blocks...)
+	return m.truncateToMaxLines(content, maxLines)
+}
 
-	lines := strings.Split(content, "\n")
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-		content = strings.Join(lines, "\n")
+func (m model) renderCurrentAgentOutput(width int) string {
+	if m.streaming && m.waitingForFirstToken {
+		return renderAgentBlock(width, m.agentNameStyle, m.agentBodyStyle, m.agentName, m.renderThinkingSweep(m.spinnerFrame))
 	}
 
-	return content
+	output := strings.TrimSpace(m.output)
+	if output == "" {
+		output = " "
+	}
+	return renderAgentBlock(width, m.agentNameStyle, m.agentBodyStyle, m.agentName, output)
+}
+
+func (m model) truncateToMaxLines(content string, maxLines int) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return content
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
 }
 
 func (m model) renderInputContent() string {
@@ -226,39 +232,6 @@ func (m model) renderContextUsage(percent float64) string {
 	label := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.ColorSubdued)).Render("ctx ")
 	value := lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%.0f%%", percent))
 	return label + value
-}
-
-func (m model) renderUserBlock(width int, label string, body string) string {
-	contentWidth := int(float64(width) * messageBlockWidthRatio)
-
-	name := m.userNameStyle.Render(strings.ToUpper(label))
-	message := m.userBodyStyle.Width(contentWidth).Align(lipgloss.Right).Render(body)
-
-	content := lipgloss.NewStyle().
-		Width(contentWidth).
-		Align(lipgloss.Right).
-		MarginTop(1).
-		Render(lipgloss.JoinVertical(lipgloss.Right, name, message))
-
-	return lipgloss.PlaceHorizontal(width, lipgloss.Right, content)
-}
-
-func (m model) renderAgentBlock(width int, label string, body string) string {
-	contentWidth := int(float64(width) * messageBlockWidthRatio)
-
-	name := m.agentNameStyle.Render(strings.ToUpper(label))
-	message := m.agentBodyStyle.Width(contentWidth).Render(body)
-
-	content := lipgloss.NewStyle().
-		Width(contentWidth).
-		MarginTop(1).
-		Render(lipgloss.JoinVertical(lipgloss.Left, name, message))
-
-	return lipgloss.PlaceHorizontal(width, lipgloss.Left, content)
-}
-
-func (m model) renderAgentThinking(width int, label string, frame int) string {
-	return m.renderAgentBlock(width, label, m.renderThinkingSweep(frame))
 }
 
 func (m model) renderThinkingSweep(frame int) string {

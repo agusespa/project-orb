@@ -87,28 +87,17 @@ func newModel(deps modelDependencies) model {
 		deps.agentName = "Agent"
 	}
 
-	styles := ui.NewStyles(deps.currentMode.ID)
-
-	return model{
-		statusMessage:     deps.statusMessage,
-		currentMode:       deps.currentMode,
-		runnerFactory:     deps.runnerFactory,
-		agentName:         deps.agentName,
-		personaPath:       deps.personaPath,
-		err:               deps.err,
-		inputBox:          styles.InputBox,
-		selectorBoxStyle:  styles.SelectorBoxStyle,
-		statusBarStyle:    styles.StatusBarStyle,
-		helpStyle:         styles.HelpStyle,
-		errorStyle:        styles.ErrorStyle,
-		metaStyle:         styles.MetaStyle,
-		summaryTitleStyle: styles.SummaryTitleStyle,
-		summaryBodyStyle:  styles.SummaryBodyStyle,
-		userNameStyle:     styles.UserNameStyle,
-		agentNameStyle:    styles.CoachNameStyle,
-		userBodyStyle:     styles.UserBodyStyle,
-		agentBodyStyle:    styles.CoachBodyStyle,
+	m := model{
+		statusMessage: deps.statusMessage,
+		currentMode:   deps.currentMode,
+		runnerFactory: deps.runnerFactory,
+		agentName:     deps.agentName,
+		personaPath:   deps.personaPath,
+		err:           deps.err,
 	}
+
+	m.applyStyles(ui.NewStyles(deps.currentMode.ID))
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -399,6 +388,11 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.switchToMode(mode, runner)
+	return m, tea.Cmd(func() tea.Msg { return startWelcomeMsg{} })
+}
+
+func (m *model) switchToMode(mode agent.Mode, runner streamRunner) {
 	m.input = ""
 	m.modeSelectorActive = false
 	m.modeSelectorIndex = 0
@@ -412,9 +406,12 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	m.doneCh = nil
 	m.cancelCurrent = nil
 	m.statusMessage = fmt.Sprintf("Switched to %s mode. Started a fresh conversation.", mode.Name)
-	slog.Info("Switched mode", "mode", mode.Name, "source", "User")
 
-	s := ui.NewStyles(mode.ID)
+	m.applyStyles(ui.NewStyles(mode.ID))
+	slog.Info("Switched mode", "mode", mode.Name, "source", "User")
+}
+
+func (m *model) applyStyles(s ui.Styles) {
 	m.inputBox = s.InputBox
 	m.selectorBoxStyle = s.SelectorBoxStyle
 	m.statusBarStyle = s.StatusBarStyle
@@ -427,8 +424,6 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	m.agentNameStyle = s.CoachNameStyle
 	m.userBodyStyle = s.UserBodyStyle
 	m.agentBodyStyle = s.CoachBodyStyle
-
-	return m, tea.Cmd(func() tea.Msg { return startWelcomeMsg{} })
 }
 
 func (m model) handleStreamError(err error) (tea.Model, tea.Cmd) {
@@ -487,18 +482,11 @@ func (m model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
 	m.session = msg.session
 	m.err = nil
 
-	if msg.canceled {
-		if strings.TrimSpace(m.output) == "" {
-			if m.pendingPrompt != "" {
-				m.input = m.pendingPrompt
-			}
-		} else {
-			m.session.AddTurn(agent.Turn{
-				User:      m.pendingPrompt,
-				Assistant: m.output,
-			})
-		}
-	} else if strings.TrimSpace(m.output) != "" {
+	hasOutput := strings.TrimSpace(m.output) != ""
+
+	if msg.canceled && !hasOutput && m.pendingPrompt != "" {
+		m.input = m.pendingPrompt
+	} else if hasOutput {
 		m.session.AddTurn(agent.Turn{
 			User:      m.pendingPrompt,
 			Assistant: m.output,
