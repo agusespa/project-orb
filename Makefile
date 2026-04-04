@@ -3,15 +3,25 @@ MAIN_PACKAGE := ./cmd/project-orb
 BUILD_DIR := bin
 RELEASE_DIR := release
 BINARY_NAME := $(BUILD_DIR)/$(PROJECT_NAME)
+INSTALL_PATH := $(HOME)/bin
 
-.PHONY: all setup tidy fmt lint test test-coverage build run devrun clean build-release
+.PHONY: all help tidy fmt lint lint-full test test-coverage build run install clean
 
 all: fmt lint test build
 
-setup:
-	@echo "Setting up Go modules..."
-	go mod tidy
-	@echo "Go modules are set up."
+help:
+	@echo "Available targets:"
+	@echo "  make all           - Format, lint, test, and build"
+	@echo "  make tidy          - Tidy go.mod and go.sum"
+	@echo "  make fmt           - Format Go files"
+	@echo "  make lint          - Run basic lint checks (go vet)"
+	@echo "  make lint-full     - Run comprehensive lint checks (golangci-lint)"
+	@echo "  make test          - Run tests"
+	@echo "  make test-coverage - Run tests with coverage report"
+	@echo "  make build         - Build the binary"
+	@echo "  make run           - Build and run the binary"
+	@echo "  make install       - Install binary to $(INSTALL_PATH)"
+	@echo "  make clean         - Remove build artifacts"
 
 tidy:
 	@echo "Tidying go.mod and go.sum..."
@@ -24,9 +34,14 @@ fmt:
 	@echo "Formatting complete."
 
 lint:
-	@echo "Running lint checks..."
+	@echo "Running basic lint checks..."
 	go vet ./...
 	@echo "Lint checks complete."
+
+lint-full:
+	@echo "Running comprehensive lint checks..."
+	golangci-lint run ./...
+	@echo "Comprehensive lint checks complete."
 
 test:
 	@echo "Running tests..."
@@ -50,20 +65,13 @@ run: build
 	@echo "Running $(BINARY_NAME)..."
 	./$(BINARY_NAME)
 
-devrun:
-	@echo "Running $(MAIN_PACKAGE) directly..."
-	go run $(MAIN_PACKAGE)
+install: build
+	@echo "Installing $(BINARY_NAME) to $(INSTALL_PATH)..."
+	@mkdir -p $(INSTALL_PATH)
+	@cp $(BINARY_NAME) $(INSTALL_PATH)/$(PROJECT_NAME)
+	@echo "Installed to $(INSTALL_PATH)/$(PROJECT_NAME)"
 
 clean:
 	@echo "Cleaning up..."
 	@rm -rf $(BUILD_DIR) $(RELEASE_DIR) coverage.out coverage.html
 	@echo "Clean complete."
-
-build-release:
-	@echo "Building release binaries..."
-	@mkdir -p $(RELEASE_DIR)
-	@echo "Building for Linux amd64..."
-	GOOS=linux GOARCH=amd64 go build -o $(RELEASE_DIR)/$(PROJECT_NAME)-linux-amd64 $(MAIN_PACKAGE)
-	@echo "Building for macOS arm64..."
-	GOOS=darwin GOARCH=arm64 go build -o $(RELEASE_DIR)/$(PROJECT_NAME)-darwin-arm64 $(MAIN_PACKAGE)
-	@echo "Release binaries built in $(RELEASE_DIR)"
