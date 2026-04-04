@@ -1,37 +1,46 @@
 #!/bin/sh
 
-set -eu
-
 echo "> Running pre-commit hook..."
 
-if ! command -v git >/dev/null 2>&1; then
-    echo "ERROR: git is required" >&2
-    exit 1
+set -e
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' ':!vendor' ':!.git')
+
+if [ -n "$staged_files" ]; then
+	echo ">> Running gofmt on staged Go files..."
+	echo "$staged_files" | xargs gofmt -w > /dev/null 2>&1
+	
+	echo ">> Running goimports on staged Go files..."
+	echo "$staged_files" | xargs goimports -w > /dev/null 2>&1
+	
+	echo "$staged_files" | xargs git add
+	
+	echo ">> Running golangci-lint on changed lines..."
+	golangci-lint run --new-from-rev=HEAD > /dev/null 2>&1 || { 
+		echo "ERROR: Lint failed"
+		exit 1
+	}
+	
+	test_packages=""
+	for file in $staged_files; do
+		package_dir=$(dirname "$file")
+		if ls "$package_dir"/*_test.go >/dev/null 2>&1; then
+			if ! echo "$test_packages" | grep -q "$package_dir"; then
+				test_packages="$test_packages ./$package_dir"
+			fi
+		fi
+	done
+	
+	if [ -n "$test_packages" ]; then
+		echo ">> Running tests for affected packages..."
+		go test $test_packages > /dev/null 2>&1 || {
+			echo "ERROR: Tests failed"
+			exit 1
+		}
+	else
+		echo ">> WARNING: No test files found for modified packages, skipping tests."
+	fi
 fi
 
-staged_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
-
-if [ -z "$staged_files" ]; then
-    echo ">> No staged Go files. Skipping Go checks."
-    exit 0
-fi
-
-echo ">> Running gofmt on staged Go files..."
-echo "$staged_files" | xargs gofmt -w 2>/dev/null
-
-if command -v goimports >/dev/null 2>&1; then
-    echo ">> Running goimports on staged Go files..."
-    echo "$staged_files" | xargs goimports -w 2>/dev/null
-else
-    echo ">> goimports not found. Skipping import normalization."
-fi
-
-echo "$staged_files" | xargs git add 2>/dev/null
-
-echo ">> Running repo lint checks..."
-golangci-lint run ./... >/dev/null 2>&1 || true
-
-echo ">> Running repo tests..."
-go test ./... >/dev/null 2>&1 || true
-
-echo ">> Pre-commit checks passed!"
+echo "✓ Pre-commit checks passed!"
+exit 0

@@ -1,29 +1,29 @@
 #!/bin/sh
 
-set -eu
-
 echo "> Running pre-push hook..."
 
-echo ">> Verifying module dependencies..."
-go mod verify >/dev/null 2>&1
+set -e
 
-echo ">> Running repo lint checks..."
-make lint >/dev/null 2>&1
+echo ">> Running dependency check..."
+go mod verify > /dev/null 2>&1 || { echo "ERROR: Module verification failed"; exit 1; }
+go mod tidy > /dev/null 2>&1
 
-echo ">> Running repo tests..."
-make test >/dev/null 2>&1
+echo ">> Running linter..."
+golangci-lint run > /dev/null 2>&1 || { echo "ERROR: Lint failed"; exit 1; }
 
-echo ">> Running race detection..."
-go test -race ./... >/dev/null 2>&1
+echo ">> Running tests..."
+go test ./... > /dev/null 2>&1 || { echo "ERROR: Tests failed"; exit 1; }
 
-echo ">> Building binary..."
-make build >/dev/null 2>&1
+echo ">> Running tests with race detection..."
+go test -race ./... > /dev/null 2>&1 || { echo "ERROR: Race detection tests failed"; exit 1; }
+
+echo ">> Running type check and build..."
+go build -o /dev/null ./... > /dev/null 2>&1 || { echo "ERROR: Build failed"; exit 1; }
 
 if command -v govulncheck >/dev/null 2>&1; then
     echo ">> Running security audit..."
-    govulncheck ./... >/dev/null 2>&1
-else
-    echo ">> govulncheck not found. Skipping security audit."
+    govulncheck ./... > /dev/null 2>&1 || { echo "ERROR: Security audit failed"; exit 1; }
 fi
 
-echo ">> Pre-push checks passed!"
+echo "✓ All checks passed!"
+exit 0
