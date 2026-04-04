@@ -39,12 +39,21 @@ func (s *Service) PrepareSession(ctx context.Context, session *SessionContext) e
 		return fmt.Errorf("session cannot be nil")
 	}
 
-	if len(session.Recent) <= maxRecentTurns {
+	// Don't compact if under word limit or too few turns
+	if session.WordCount() <= maxRecentWords || len(session.Recent) <= minRecentTurns {
 		return nil
 	}
 
-	overflowCount := len(session.Recent) - maxRecentTurns
-	overflowTurns := append([]Turn(nil), session.Recent[:overflowCount]...)
+	// Compact oldest turns until we're under the word limit
+	overflowTurns := []Turn{}
+	for session.WordCount() > maxRecentWords && len(session.Recent) > minRecentTurns {
+		overflowTurns = append(overflowTurns, session.Recent[0])
+		session.Recent = session.Recent[1:]
+	}
+
+	if len(overflowTurns) == 0 {
+		return nil
+	}
 
 	summary, err := s.summarize(ctx, s.client, session.Summary, overflowTurns)
 	if err != nil {
@@ -52,8 +61,6 @@ func (s *Service) PrepareSession(ctx context.Context, session *SessionContext) e
 	}
 
 	session.Summary = summary
-	session.Recent = append([]Turn(nil), session.Recent[overflowCount:]...)
-
 	return nil
 }
 

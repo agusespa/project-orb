@@ -10,7 +10,9 @@ import (
 
 const (
 	requestTimeout = 10 * time.Minute
-	maxRecentTurns = 6
+	maxRecentWords = 3000 // Recent history before compaction (optimized for performance/quality)
+	minRecentTurns = 3    // Always keep at least this many turns
+	maxTotalWords  = 6000 // Total context limit (recent + summary) for UI indicator
 )
 
 //go:embed prompts/summary_system.md
@@ -40,6 +42,35 @@ type SessionContext struct {
 
 func (s *SessionContext) AddTurn(turn Turn) {
 	s.Recent = append(s.Recent, turn)
+}
+
+func (s *SessionContext) WordCount() int {
+	count := 0
+	for _, turn := range s.Recent {
+		count += countWords(turn.User)
+		count += countWords(turn.Assistant)
+	}
+	return count
+}
+
+func (s *SessionContext) TotalWordCount() int {
+	count := s.WordCount()
+	count += countWords(s.Summary)
+	return count
+}
+
+func (s *SessionContext) ContextUsagePercent() float64 {
+	total := s.TotalWordCount()
+	return (float64(total) / float64(maxTotalWords)) * 100
+}
+
+func countWords(s string) int {
+	return len(strings.Fields(s))
+}
+
+// MaxTotalWords returns the maximum total word count for context
+func MaxTotalWords() int {
+	return maxTotalWords
 }
 
 func buildResponseContext(analysis string) string {

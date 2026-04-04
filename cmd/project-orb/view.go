@@ -237,7 +237,10 @@ func (m model) renderHeader(width int) string {
 		hours := int(elapsed.Hours())
 		minutes := int(elapsed.Minutes()) % 60
 		seconds := int(elapsed.Seconds()) % 60
-		rightText = ui.NeutralMetaStyle.Render(fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds))
+
+		// Add context usage indicator
+		contextIndicator := m.renderContextIndicator()
+		rightText = contextIndicator + "  " + ui.NeutralMetaStyle.Render(fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds))
 	}
 
 	// Build a three-section layout: empty | center | right
@@ -258,6 +261,32 @@ func (m model) renderHeader(width int) string {
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
 	return m.statusBarStyle.Width(width).Render(row)
+}
+
+func (m model) renderContextIndicator() string {
+	percent := m.session.ContextUsagePercent()
+	totalWords := m.session.TotalWordCount()
+
+	var icon string
+	var color lipgloss.Color
+
+	switch {
+	case percent < 50:
+		icon = "●"
+		color = lipgloss.Color("10") // Green
+	case percent < 80:
+		icon = "●"
+		color = lipgloss.Color("11") // Yellow
+	case percent < 95:
+		icon = "●"
+		color = lipgloss.Color("214") // Orange
+	default:
+		icon = "●"
+		color = lipgloss.Color("9") // Red
+	}
+
+	style := lipgloss.NewStyle().Foreground(color)
+	return style.Render(fmt.Sprintf("%s %d", icon, totalWords))
 }
 
 func renderedLineCount(s string) int {
