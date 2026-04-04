@@ -5,23 +5,23 @@ set -eu
 echo "> Running pre-push hook..."
 
 echo ">> Verifying module dependencies..."
-go mod verify
+go mod verify >/dev/null 2>&1
 
 echo ">> Running repo lint checks..."
-make lint
+make lint >/dev/null 2>&1
 
 echo ">> Running repo tests..."
-make test
+make test >/dev/null 2>&1
 
 echo ">> Running race detection..."
-go test -race ./...
+go test -race ./... >/dev/null 2>&1
 
 echo ">> Building binary..."
-make build
+make build >/dev/null 2>&1
 
 if command -v govulncheck >/dev/null 2>&1; then
     echo ">> Running security audit..."
-    govulncheck ./...
+    govulncheck ./... >/dev/null 2>&1
 else
     echo ">> govulncheck not found. Skipping security audit."
 fi

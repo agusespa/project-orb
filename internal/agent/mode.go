@@ -1,4 +1,4 @@
-package coach
+package agent
 
 import (
 	_ "embed"
@@ -35,19 +35,19 @@ func BuiltInModes() []Mode {
 		{
 			ID:           ModeCoach,
 			Name:         "Coach",
-			Description:  "Practical support for everyday reflection, decisions, and next steps.",
+			Description:  "Guidance for everyday reflection, decisions, and next steps.",
 			Instructions: coachInstructions,
 		},
 		{
 			ID:           ModePerformanceReview,
 			Name:         "Performance Review",
-			Description:  "Structured feedback on effectiveness, execution, habits, and growth areas.",
+			Description:  "Structured feedback on effectiveness, habits and growth areas.",
 			Instructions: performanceReviewInstructions,
 		},
 		{
 			ID:           ModeAnalyst,
 			Name:         "Analyst",
-			Description:  "Deeper philosophical and psychoanalytic questioning to examine motives and patterns.",
+			Description:  "Deeper psychoanalytic questioning to examine motives and patterns.",
 			Instructions: analystInstructions,
 		},
 	}

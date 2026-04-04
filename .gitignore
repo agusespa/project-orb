@@ -6,7 +6,7 @@
 *.dylib
 /bin
 *.test
-project-orb
+/project-orb
 
 # Code coverage profiles and other test artifacts
 *.out

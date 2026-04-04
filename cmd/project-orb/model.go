@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
-	"project-orb/internal/coach"
+	"project-orb/internal/agent"
+	"project-orb/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -18,10 +21,11 @@ type streamErrMsg struct {
 }
 
 type spinnerTickMsg struct{}
+type clockTickMsg struct{}
 type startWelcomeMsg struct{}
 
 type streamDoneMsg struct {
-	session  coach.SessionContext
+	session  agent.SessionContext
 	canceled bool
 }
 
@@ -31,7 +35,7 @@ type doneChannelClosedMsg struct{}
 
 type modelDependencies struct {
 	runnerFactory runnerFactory
-	currentMode   coach.Mode
+	currentMode   agent.Mode
 	coachName     string
 	personaPath   string
 	err           error
@@ -49,19 +53,21 @@ type model struct {
 	modeSelectorIndex    int
 	waitingForFirstToken bool
 	spinnerFrame         int
-	session              coach.SessionContext
-	currentMode          coach.Mode
+	session              agent.SessionContext
+	currentMode          agent.Mode
 	coachName            string
 	personaPath          string
 	streaming            bool
 	completed            bool
 	cancelCurrent        context.CancelFunc
+	shutdownCtx          context.Context
 	err                  error
 	tokenCh              <-chan string
 	errCh                <-chan error
 	doneCh               <-chan streamResult
 	runner               streamRunner
 	runnerFactory        runnerFactory
+	sessionStart         time.Time
 	inputBox             lipgloss.Style
 	selectorBoxStyle     lipgloss.Style
 	statusBarStyle       lipgloss.Style
@@ -71,20 +77,20 @@ type model struct {
 	summaryTitleStyle    lipgloss.Style
 	summaryBodyStyle     lipgloss.Style
 	userNameStyle        lipgloss.Style
-	auraNameStyle        lipgloss.Style
+	coachNameStyle       lipgloss.Style
 	userBodyStyle        lipgloss.Style
-	auraBodyStyle        lipgloss.Style
+	coachBodyStyle       lipgloss.Style
 }
 
 func newModel(deps modelDependencies) model {
 	if deps.currentMode.ID == "" {
-		deps.currentMode = coach.DefaultMode()
+		deps.currentMode = agent.DefaultMode()
 	}
 	if deps.coachName == "" {
 		deps.coachName = "Coach"
 	}
 
-	styles := newStyles()
+	styles := ui.NewStyles(deps.currentMode.ID)
 
 	return model{
 		statusMessage:     deps.statusMessage,
@@ -93,18 +99,18 @@ func newModel(deps modelDependencies) model {
 		coachName:         deps.coachName,
 		personaPath:       deps.personaPath,
 		err:               deps.err,
-		inputBox:          styles.inputBox,
-		selectorBoxStyle:  styles.selectorBoxStyle,
-		statusBarStyle:    styles.statusBarStyle,
-		helpStyle:         styles.helpStyle,
-		errorStyle:        styles.errorStyle,
-		metaStyle:         styles.metaStyle,
-		summaryTitleStyle: styles.summaryTitleStyle,
-		summaryBodyStyle:  styles.summaryBodyStyle,
-		userNameStyle:     styles.userNameStyle,
-		auraNameStyle:     styles.auraNameStyle,
-		userBodyStyle:     styles.userBodyStyle,
-		auraBodyStyle:     styles.auraBodyStyle,
+		inputBox:          styles.InputBox,
+		selectorBoxStyle:  styles.SelectorBoxStyle,
+		statusBarStyle:    styles.StatusBarStyle,
+		helpStyle:         styles.HelpStyle,
+		errorStyle:        styles.ErrorStyle,
+		metaStyle:         styles.MetaStyle,
+		summaryTitleStyle: styles.SummaryTitleStyle,
+		summaryBodyStyle:  styles.SummaryBodyStyle,
+		userNameStyle:     styles.UserNameStyle,
+		coachNameStyle:    styles.CoachNameStyle,
+		userBodyStyle:     styles.UserBodyStyle,
+		coachBodyStyle:    styles.CoachBodyStyle,
 	}
 }
 
@@ -124,11 +130,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+	case clockTickMsg:
+		if m.sessionStart.IsZero() {
+			return m, nil
+		}
+		return m, clockTick()
 	case spinnerTickMsg:
 		if !m.streaming {
 			return m, nil
 		}
-		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(thinkingFrames)
 		return m, spinnerTick()
 	case startWelcomeMsg:
 		return m.startWelcome()
@@ -156,6 +167,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		// Cancel any ongoing stream before quitting
+		if m.streaming && m.cancelCurrent != nil {
+			slog.Info("Canceling ongoing stream before shutdown...")
+			m.cancelCurrent()
+		}
 		return m, tea.Quit
 	case tea.KeyEsc:
 		if m.streaming && m.cancelCurrent != nil {
@@ -170,12 +186,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		runes := []rune(m.input)
 		m.input = string(runes[:len(runes)-1])
+		m.syncSlashCommandUI()
 		return m, nil
 	case tea.KeySpace:
 		if m.streaming {
 			return m, nil
 		}
 		m.input += " "
+		m.syncSlashCommandUI()
 		return m, nil
 	default:
 		if m.streaming {
@@ -183,6 +201,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Type == tea.KeyRunes {
 			m.input += string(msg.Runes)
+			m.syncSlashCommandUI()
 		}
 		return m, nil
 	}
@@ -193,6 +212,11 @@ func (m model) handleModeSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		// Cancel any ongoing stream before quitting
+		if m.streaming && m.cancelCurrent != nil {
+			slog.Info("Canceling ongoing stream before shutdown...")
+			m.cancelCurrent()
+		}
 		return m, tea.Quit
 	case tea.KeyEsc:
 		m.modeSelectorActive = false
@@ -263,13 +287,23 @@ func (m model) startPrompt() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	startClock := m.sessionStart.IsZero()
+	if startClock {
+		m.sessionStart = time.Now()
+	}
+
 	cmd, tokenCh, errCh, doneCh, cancel := runner.Start(prompt, m.session)
 	m.tokenCh = tokenCh
 	m.errCh = errCh
 	m.doneCh = doneCh
 	m.cancelCurrent = cancel
 
-	return m, tea.Batch(cmd, spinnerTick())
+	cmds := []tea.Cmd{cmd, spinnerTick()}
+	if startClock {
+		cmds = append(cmds, clockTick())
+	}
+
+	return m, tea.Batch(cmds...)
 }
 
 func (m model) startWelcome() (tea.Model, tea.Cmd) {
@@ -291,6 +325,7 @@ func (m model) startWelcome() (tea.Model, tea.Cmd) {
 	m.spinnerFrame = 0
 	m.pendingPrompt = ""
 	m.output = ""
+	m.sessionStart = time.Now()
 
 	cmd, tokenCh, errCh, doneCh, cancel := runner.StartWelcome(m.session)
 	m.tokenCh = tokenCh
@@ -298,7 +333,7 @@ func (m model) startWelcome() (tea.Model, tea.Cmd) {
 	m.doneCh = doneCh
 	m.cancelCurrent = cancel
 
-	return m, tea.Batch(cmd, spinnerTick())
+	return m, tea.Batch(cmd, spinnerTick(), clockTick())
 }
 
 func (m model) ensureRunner() (streamRunner, error) {
@@ -326,7 +361,7 @@ func (m model) handleCommand(command string) (tea.Model, tea.Cmd) {
 	}
 
 	switch fields[0] {
-	case "/mode":
+	case "/mode", "/modes":
 		return m.handleModeCommand(fields)
 	default:
 		m.err = fmt.Errorf("unknown command %q", fields[0])
@@ -389,14 +424,30 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 	m.modeSelectorIndex = 0
 	m.currentMode = mode
 	m.runner = runner
-	m.session = coach.SessionContext{}
+	m.session = agent.SessionContext{}
 	m.pendingPrompt = ""
 	m.output = ""
 	m.tokenCh = nil
 	m.errCh = nil
 	m.doneCh = nil
 	m.cancelCurrent = nil
+	m.sessionStart = time.Time{}
 	m.statusMessage = fmt.Sprintf("Switched to %s mode. Started a fresh conversation.", mode.Name)
+	slog.Info("Switched mode", "mode", mode.Name, "source", "User")
+
+	s := ui.NewStyles(mode.ID)
+	m.inputBox = s.InputBox
+	m.selectorBoxStyle = s.SelectorBoxStyle
+	m.statusBarStyle = s.StatusBarStyle
+	m.helpStyle = s.HelpStyle
+	m.errorStyle = s.ErrorStyle
+	m.metaStyle = s.MetaStyle
+	m.summaryTitleStyle = s.SummaryTitleStyle
+	m.summaryBodyStyle = s.SummaryBodyStyle
+	m.userNameStyle = s.UserNameStyle
+	m.coachNameStyle = s.CoachNameStyle
+	m.userBodyStyle = s.UserBodyStyle
+	m.coachBodyStyle = s.CoachBodyStyle
 
 	return m, tea.Cmd(func() tea.Msg { return startWelcomeMsg{} })
 }
@@ -408,10 +459,11 @@ func (m model) handleStreamError(err error) (tea.Model, tea.Cmd) {
 	m.completed = false
 	m.err = err
 	m.statusMessage = ""
+	slog.Error("Stream error", "err", err, "source", "System")
 	return m, nil
 }
 
-func (m model) currentModeMatches() []coach.Mode {
+func (m model) currentModeMatches() []agent.Mode {
 	return matchingModes(modeQueryFromInput(m.input))
 }
 
@@ -432,8 +484,20 @@ func (m *model) resetModeSelectorIndex() {
 	m.modeSelectorIndex = 0
 }
 
+func (m *model) syncSlashCommandUI() {
+	if !m.isModeCommandInput() {
+		m.modeSelectorActive = false
+		m.modeSelectorIndex = 0
+		return
+	}
+
+	m.modeSelectorActive = true
+	m.resetModeSelectorIndex()
+}
+
 func (m model) isModeCommandInput() bool {
-	return strings.HasPrefix(strings.TrimSpace(m.input), "/mode")
+	trimmed := strings.TrimSpace(m.input)
+	return strings.HasPrefix(trimmed, "/mode") || strings.HasPrefix(trimmed, "/modes")
 }
 
 func (m model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
@@ -450,13 +514,13 @@ func (m model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
 				m.input = m.pendingPrompt
 			}
 		} else {
-			m.session.AddTurn(coach.Turn{
+			m.session.AddTurn(agent.Turn{
 				User:      m.pendingPrompt,
 				Assistant: m.output,
 			})
 		}
 	} else if strings.TrimSpace(m.output) != "" {
-		m.session.AddTurn(coach.Turn{
+		m.session.AddTurn(agent.Turn{
 			User:      m.pendingPrompt,
 			Assistant: m.output,
 		})

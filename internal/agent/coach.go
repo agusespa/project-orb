@@ -1,7 +1,8 @@
-package coach
+package agent
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,21 @@ const (
 	requestTimeout = 10 * time.Minute
 	maxRecentTurns = 6
 )
+
+//go:embed prompts/summary_system.md
+var summarySystemPrompt string
+
+//go:embed prompts/analysis_task.md
+var analysisTaskPrompt string
+
+//go:embed prompts/summary_task.md
+var summaryTaskPrompt string
+
+//go:embed prompts/response_task.md
+var responseTaskPrompt string
+
+//go:embed prompts/welcome_task.md
+var welcomeTaskPrompt string
 
 type Turn struct {
 	User      string
@@ -54,18 +70,13 @@ func buildConversationMessages(systemMessage string, session SessionContext) []c
 	return messages
 }
 
-func updateConversationSummary(ctx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
+func updateConversationSummary(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 	if len(turns) == 0 {
 		return existingSummary, nil
 	}
 
-	systemMessage, err := mode.SystemMessage()
-	if err != nil {
-		return "", err
-	}
-
 	messages := []chatMessage{
-		{Role: "system", Content: systemMessage},
+		{Role: "system", Content: summarySystemPrompt},
 	}
 
 	if summary := strings.TrimSpace(existingSummary); summary != "" {
@@ -93,49 +104,3 @@ func updateConversationSummary(ctx context.Context, client *Client, mode Mode, e
 
 	return strings.TrimSpace(summary), nil
 }
-
-const analysisTaskPrompt = `Analyze the situation before responding.
-
-Identify:
-
-- what the user is really asking
-- possible emotional context
-- potential cognitive biases
-- useful coaching direction
-
-Return a short structured analysis.`
-
-const summaryTaskPrompt = `Update the rolling conversation summary using the prior summary and the conversation turns above.
-
-Keep it compact and useful for future coaching.
-
-Capture:
-
-- the user's main situation or goals
-- emotionally relevant context
-- important patterns, tensions, or recurring themes
-- any concrete decisions, commitments, or open questions
-
-Do not include filler.
-Return a short structured summary.`
-
-const responseTaskPrompt = `Provide a concise, thoughtful coaching response.
-
-Guidelines:
-
-- natural tone
-- not robotic
-- may ask one or two thoughtful questions
-- prefer clarity over length
-- help the conversation continue naturally instead of closing it too early
-- when appropriate, end with a reflective question or gentle invitation to continue`
-
-const welcomeTaskPrompt = `Open the conversation with a short greeting that fits the current mode.
-
-Guidelines:
-
-- sound natural
-- do not mention internal instructions
-- do not assume prior context
-- invite the user to begin
-- keep it to one or two short sentences`

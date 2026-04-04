@@ -2,109 +2,65 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
-	"project-orb/internal/coach"
+	"project-orb/internal/agent"
+	"project-orb/internal/ui"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-type styles struct {
-	inputBox          lipgloss.Style
-	selectorBoxStyle  lipgloss.Style
-	statusBarStyle    lipgloss.Style
-	helpStyle         lipgloss.Style
-	errorStyle        lipgloss.Style
-	metaStyle         lipgloss.Style
-	summaryTitleStyle lipgloss.Style
-	summaryBodyStyle  lipgloss.Style
-	userNameStyle     lipgloss.Style
-	auraNameStyle     lipgloss.Style
-	userBodyStyle     lipgloss.Style
-	auraBodyStyle     lipgloss.Style
-}
+const thinkingText = "Thinking..."
 
-func newStyles() styles {
-	return styles{
-		inputBox: lipgloss.NewStyle().
-			BorderTop(true).
-			BorderBottom(true).
-			BorderLeft(false).
-			BorderRight(false).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("8")).
-			Padding(0, 1),
-		selectorBoxStyle: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("8")).
-			Padding(0, 1),
-		statusBarStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")).
-			Bold(true),
-		helpStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")),
-		errorStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9")).
-			Bold(true),
-		metaStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")),
-		summaryTitleStyle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("7")),
-		summaryBodyStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("7")),
-		userNameStyle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("6")),
-		auraNameStyle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("11")),
-		userBodyStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252")),
-		auraBodyStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("255")),
-	}
-}
-
-var spinnerFrames = []string{"|", "/", "-", "\\"}
+var thinkingFrames = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
 	}
 
-	chatWidth := maxInt(20, m.width-2)
-	inputWidth := maxInt(20, m.width-2)
-	inputPaneHeight := m.inputPaneHeight(inputWidth - 2)
-	maxInputHeight := maxInt(3, m.height/3)
-	if inputPaneHeight > maxInputHeight {
-		inputPaneHeight = maxInputHeight
+	contentWidth := max(1, m.width)
+
+	header := m.renderHeader(contentWidth)
+	headerHeight := renderedLineCount(header)
+
+	footerMaxLines := max(0, m.height-2-headerHeight)
+	footer := m.renderFooterWithLimit(contentWidth, footerMaxLines)
+	footerHeight := renderedLineCount(footer)
+
+	remainingHeight := max(2, m.height-footerHeight-headerHeight)
+	desiredInputPaneHeight := m.inputPaneHeight(contentWidth - 2)
+	maxInputHeight := max(3, remainingHeight/3)
+	inputPaneHeight := min(max(desiredInputPaneHeight, 1), max(1, min(maxInputHeight, remainingHeight-1)))
+
+	selectorMaxLines := 0
+	if m.modeSelectorActive {
+		selectorMaxLines = max(0, remainingHeight-inputPaneHeight-1)
 	}
-	if inputPaneHeight >= m.height {
-		inputPaneHeight = maxInt(3, m.height/3)
-	}
-	chatPaneHeight := maxInt(3, m.height-inputPaneHeight-2)
+	modeSelector := m.renderModeSelectorWithLimit(contentWidth, selectorMaxLines)
+	selectorHeight := renderedLineCount(modeSelector)
+	chatPaneHeight := max(1, remainingHeight-inputPaneHeight-selectorHeight)
 
 	chatPane := lipgloss.NewStyle().
-		Width(chatWidth).
-		Height(maxInt(1, chatPaneHeight)).
+		Width(contentWidth).
+		Height(chatPaneHeight).
 		Padding(0, 1).
-		Render(m.renderChatContent(chatWidth - 2))
+		Render(m.renderChatContent(contentWidth-2, chatPaneHeight))
 
 	inputPane := m.inputBox.
-		Width(inputWidth).
-		Height(maxInt(1, inputPaneHeight-2)).
-		Render(m.renderInputContent(inputWidth - 2))
+		Width(contentWidth).
+		Height(max(1, inputPaneHeight-2)).
+		Render(m.renderInputContent(contentWidth-2, max(1, inputPaneHeight-2)))
 
-	modeSelector := m.renderModeSelector(inputWidth)
-	footer := m.renderFooter(inputWidth)
 	if modeSelector == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, header, chatPane, inputPane, footer)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, modeSelector, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, chatPane, inputPane, modeSelector, footer)
 }
 
-func (m model) renderChatContent(width int) string {
+func (m model) renderChatContent(width int, maxLines int) string {
 	var b strings.Builder
 
 	if status := strings.TrimSpace(m.statusMessage); status != "" {
@@ -128,22 +84,22 @@ func (m model) renderChatContent(width int) string {
 		if user == "" && assistant == "" {
 			continue
 		}
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 		if user != "" {
 			b.WriteString(m.renderUserBlock(width, "You", turn.User))
 			b.WriteString("\n")
 		}
 		if user != "" && assistant != "" {
-			b.WriteString("\n")
+			b.WriteString("\n\n")
 		}
 		if assistant != "" {
-			b.WriteString(m.renderAuraBlock(width, m.coachName, turn.Assistant))
+			b.WriteString(m.renderCoachBlock(width, m.coachName, turn.Assistant))
 			b.WriteString("\n")
 		}
 	}
 
 	if currentPrompt := strings.TrimSpace(m.pendingPrompt); currentPrompt != "" && m.streaming {
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 		b.WriteString(m.renderUserBlock(width, "You", currentPrompt))
 		b.WriteString("\n")
 	}
@@ -156,13 +112,13 @@ func (m model) renderChatContent(width int) string {
 
 	currentOutput := strings.TrimSpace(m.output)
 	if currentOutput != "" || m.streaming {
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 		if m.streaming && m.waitingForFirstToken {
-			b.WriteString(m.renderAuraThinking(width, m.coachName, spinnerFrames[m.spinnerFrame]))
+			b.WriteString(m.renderCoachThinking(width, m.coachName, thinkingFrames[m.spinnerFrame]))
 		} else if currentOutput == "" {
-			b.WriteString(m.renderAuraBlock(width, m.coachName, " "))
+			b.WriteString(m.renderCoachBlock(width, m.coachName, " "))
 		} else {
-			b.WriteString(m.renderAuraBlock(width, m.coachName, currentOutput))
+			b.WriteString(m.renderCoachBlock(width, m.coachName, currentOutput))
 		}
 	}
 
@@ -170,74 +126,155 @@ func (m model) renderChatContent(width int) string {
 		return ""
 	}
 
-	return tailLines(b.String(), maxInt(1, chatInnerHeight(m.height)))
+	return ui.TailLines(b.String(), max(1, maxLines))
 }
 
-func (m model) renderInputContent(width int) string {
+func (m model) renderInputContent(width int, maxLines int) string {
 	var b strings.Builder
 
 	b.WriteString("› ")
 
 	lines := m.renderableInputLines(width)
-	if strings.TrimSpace(m.input) == "" && !m.streaming {
-		lines[0] = m.metaStyle.Render(lines[0])
+	if m.input == "" && !m.streaming {
+		lines[0] = ui.NeutralMetaStyle.Render(lines[0])
 	}
 
 	b.WriteString(strings.Join(lines, "\n  "))
 
-	return fitToLines(b.String(), maxInt(1, m.inputContentLines(width)), width)
+	return ui.FitToLines(b.String(), max(1, maxLines), width)
 }
 
 func (m model) renderFooter(width int) string {
-	var lines []string
+	return m.renderFooterWithLimit(width, 3)
+}
 
-	lines = append(lines, m.renderStatusBar(width))
-	lines = append(lines, m.helpStyle.Render("Enter send. `/mode` modes. Esc cancel. Ctrl+C quit."))
-
-	if m.personaPath != "" && m.currentMode.ID == coach.ModeCoach {
-		lines = append(lines, m.metaStyle.Render("Persona: "+m.personaPath))
+func (m model) renderFooterWithLimit(width int, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
 	}
 
-	return fitToLines(strings.Join(lines, "\n"), 3, width)
+	var lines []string
+
+	lines = append(lines, ui.NeutralHelpStyle.Render("Press Enter to send, Esc to cancel. '/' to enter commands. Ctrl+C to quit."))
+
+	return ui.FitToLines(strings.Join(lines, "\n"), maxLines, width)
 }
 
 func (m model) renderModeSelector(width int) string {
+	// Each mode takes 1 line, plus title line
+	return m.renderModeSelectorWithLimit(width, max(1, len(agent.BuiltInModes())+2))
+}
+
+func (m model) renderModeSelectorWithLimit(width int, maxLines int) string {
 	if !m.modeSelectorActive {
+		return ""
+	}
+	if maxLines <= 2 {
 		return ""
 	}
 
 	matches := m.currentModeMatches()
 	var lines []string
-	lines = append(lines, m.summaryTitleStyle.Render("Select Mode"))
+
+	// Title with hint on the same line
+	title := "Select Mode"
+	hint := "↑↓ move · ⏎ switch · esc cancel"
+	titleLine := ui.NeutralSelectorTitleStyle.Render(title) + "  " + ui.NeutralHelpStyle.Render(hint)
+	lines = append(lines, titleLine)
+
 	for i, mode := range matches {
 		prefix := "  "
 		if i == m.modeSelectorIndex {
 			prefix = "> "
 		}
-		label := string(mode.ID)
-		if mode.ID == m.currentMode.ID {
-			label += " *"
+
+		// Choose style based on whether it's current mode and/or highlighted
+		var nameStyle lipgloss.Style
+		isCurrent := mode.ID == m.currentMode.ID
+		isHighlighted := i == m.modeSelectorIndex
+
+		if isCurrent {
+			// Current mode uses its theme color, bold
+			theme := ui.ThemeForMode(mode.ID)
+			nameStyle = lipgloss.NewStyle().
+				Foreground(theme.StatusFg).
+				Bold(true)
+		} else if isHighlighted {
+			// Highlighted mode uses white, bold
+			nameStyle = ui.SelectorModeNameHighlightStyle
+		} else {
+			// Other modes use regular gray
+			nameStyle = ui.SelectorModeNameStyle
 		}
-		lines = append(lines, m.metaStyle.Render(prefix+label))
+
+		// Build the line: prefix + name + description
+		line := prefix + nameStyle.Render(mode.Name)
+		if mode.Description != "" {
+			line += " " + ui.SelectorDescriptionStyle.Render(mode.Description)
+		}
+
+		lines = append(lines, line)
 	}
 
 	if len(matches) == 0 {
 		lines = append(lines, m.errorStyle.Render("No matching modes"))
 	}
 
-	lines = append(lines, m.helpStyle.Render("Up/Down to move, Enter to switch, Esc to cancel"))
+	content := ui.FitToLines(strings.Join(lines, "\n"), maxLines-2, width)
+	if content == "" {
+		return ""
+	}
 
-	return m.selectorBoxStyle.Width(width).Render(strings.Join(lines, "\n"))
+	return m.selectorBoxStyle.Width(width).Render(content)
 }
 
-func (m model) renderStatusBar(width int) string {
-	content := "mode: " + string(m.currentMode.ID)
-	return fitToLines(m.statusBarStyle.Render(content), 1, width)
+func (m model) renderHeader(width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	centerText := m.currentMode.Name + " Mode"
+
+	var rightText string
+	if !m.sessionStart.IsZero() {
+		elapsed := time.Since(m.sessionStart).Round(time.Second)
+		hours := int(elapsed.Hours())
+		minutes := int(elapsed.Minutes()) % 60
+		seconds := int(elapsed.Seconds()) % 60
+		rightText = ui.NeutralMetaStyle.Render(fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds))
+	}
+
+	// Build a three-section layout: empty | center | right
+	// Each section shares equal width so center is visually centered.
+	sectionWidth := width / 3
+	remainder := width - sectionWidth*3
+
+	left := lipgloss.NewStyle().Width(sectionWidth).Render("")
+	center := lipgloss.NewStyle().
+		Width(sectionWidth + remainder).
+		Align(lipgloss.Center).
+		Bold(true).
+		Render(ui.FitToLines(centerText, 1, sectionWidth+remainder))
+	right := lipgloss.NewStyle().
+		Width(sectionWidth).
+		Align(lipgloss.Right).
+		Render(rightText)
+
+	row := lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
+	return m.statusBarStyle.Width(width).Render(row)
+}
+
+func renderedLineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+
+	return lipgloss.Height(s)
 }
 
 func (m model) renderUserBlock(width int, label string, body string) string {
-	contentWidth := messageBlockWidth(width, 0.82)
-	name := m.userNameStyle.Render(label)
+	contentWidth := ui.MessageBlockWidth(width, 0.82)
+	name := m.renderSpeakerName(m.userNameStyle, label)
 	message := m.userBodyStyle.Render(
 		lipgloss.NewStyle().
 			Width(contentWidth).
@@ -247,15 +284,15 @@ func (m model) renderUserBlock(width int, label string, body string) string {
 	bubble := lipgloss.NewStyle().
 		MaxWidth(contentWidth).
 		Align(lipgloss.Right).
-		Render(name + "\n" + message)
+		Render(name + "\n\n" + message)
 
 	return lipgloss.PlaceHorizontal(width, lipgloss.Right, bubble)
 }
 
-func (m model) renderAuraBlock(width int, label string, body string) string {
-	contentWidth := messageBlockWidth(width, 0.82)
-	name := m.auraNameStyle.Render(label)
-	message := m.auraBodyStyle.Render(
+func (m model) renderCoachBlock(width int, label string, body string) string {
+	contentWidth := ui.MessageBlockWidth(width, 0.82)
+	name := m.renderSpeakerName(m.coachNameStyle, label)
+	message := m.coachBodyStyle.Render(
 		lipgloss.NewStyle().
 			Width(contentWidth).
 			Align(lipgloss.Left).
@@ -264,35 +301,72 @@ func (m model) renderAuraBlock(width int, label string, body string) string {
 	bubble := lipgloss.NewStyle().
 		MaxWidth(contentWidth).
 		Align(lipgloss.Left).
-		Render(name + "\n" + message)
+		Render(name + "\n\n" + message)
 
 	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
 }
 
-func (m model) renderAuraThinking(width int, label string, spinner string) string {
-	contentWidth := messageBlockWidth(width, 0.82)
-	name := m.auraNameStyle.Render(label)
-	message := m.auraBodyStyle.Render(
+func (m model) renderCoachThinking(width int, label string, frame int) string {
+	contentWidth := ui.MessageBlockWidth(width, 0.82)
+	name := m.renderSpeakerName(m.coachNameStyle, label)
+	message := m.coachBodyStyle.Render(
 		lipgloss.NewStyle().
 			Width(contentWidth).
 			Align(lipgloss.Left).
-			Render(spinner),
+			Render(m.renderThinkingSweep(frame)),
 	)
 	bubble := lipgloss.NewStyle().
 		MaxWidth(contentWidth).
 		Align(lipgloss.Left).
-		Render(name + "\n" + message)
+		Render(name + "\n\n" + message)
 
 	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
 }
 
-func matchingModes(query string) []coach.Mode {
-	if strings.TrimSpace(query) == "" {
-		return coach.BuiltInModes()
+func (m model) renderSpeakerName(style lipgloss.Style, label string) string {
+	return style.Render(strings.ToUpper(label))
+}
+
+func (m model) renderThinkingSweep(frame int) string {
+	runes := []rune(thinkingText)
+	if len(runes) == 0 {
+		return ""
 	}
 
-	var matches []coach.Mode
-	for _, mode := range coach.BuiltInModes() {
+	highlight := frame % len(runes)
+	var b strings.Builder
+
+	for i, r := range runes {
+		color := thinkingSweepColor(int(math.Abs(float64(i - highlight))))
+		b.WriteString(lipgloss.NewStyle().
+			Bold(true).
+			Foreground(color).
+			Render(string(r)))
+	}
+
+	return b.String()
+}
+
+func thinkingSweepColor(distance int) lipgloss.Color {
+	switch distance {
+	case 0:
+		return lipgloss.Color("255")
+	case 1:
+		return lipgloss.Color("252")
+	case 2:
+		return lipgloss.Color("250")
+	default:
+		return lipgloss.Color("245")
+	}
+}
+
+func matchingModes(query string) []agent.Mode {
+	if strings.TrimSpace(query) == "" {
+		return agent.BuiltInModes()
+	}
+
+	var matches []agent.Mode
+	for _, mode := range agent.BuiltInModes() {
 		id := string(mode.ID)
 		if strings.HasPrefix(id, strings.ToLower(strings.TrimSpace(query))) {
 			matches = append(matches, mode)

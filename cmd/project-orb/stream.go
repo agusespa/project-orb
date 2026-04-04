@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
-	"project-orb/internal/coach"
+	"project-orb/internal/agent"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -13,40 +14,46 @@ import (
 var errRunnerNotConfigured = errors.New("stream runner is not configured")
 
 type streamResult struct {
-	session  coach.SessionContext
+	session  agent.SessionContext
 	canceled bool
 }
 
 type streamRunner interface {
-	Start(prompt string, session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
-	StartWelcome(session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
+	Start(prompt string, session agent.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
+	StartWelcome(session agent.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc)
 }
 
-type runnerFactory func(mode coach.Mode) (streamRunner, error)
+type runnerFactory func(mode agent.Mode) (streamRunner, error)
 
-type coachRunner struct {
-	service *coach.Service
+type agentRunner struct {
+	service *agent.Service
 }
 
-func newCoachRunner(service *coach.Service) streamRunner {
+func newAgentRunner(service *agent.Service) streamRunner {
 	if service == nil {
 		return nil
 	}
 
-	return coachRunner{service: service}
+	return agentRunner{service: service}
 }
 
-func (r coachRunner) Start(prompt string, session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+func (r agentRunner) Start(prompt string, session agent.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	return startStreaming(prompt, session, r.service)
 }
 
-func (r coachRunner) StartWelcome(session coach.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+func (r agentRunner) StartWelcome(session agent.SessionContext) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	return startWelcomeStreaming(session, r.service)
 }
 
 func spinnerTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return spinnerTickMsg{}
+	})
+}
+
+func clockTick() tea.Cmd {
+	return tea.Tick(1*time.Second, func(time.Time) tea.Msg {
+		return clockTickMsg{}
 	})
 }
 
@@ -80,7 +87,7 @@ func waitForStreamResult(ch <-chan streamResult) tea.Cmd {
 	}
 }
 
-func startStreaming(prompt string, session coach.SessionContext, service *coach.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+func startStreaming(prompt string, session agent.SessionContext, service *agent.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tokenCh := make(chan string)
 	errCh := make(chan error, 1)
@@ -90,6 +97,7 @@ func startStreaming(prompt string, session coach.SessionContext, service *coach.
 		defer close(tokenCh)
 		defer close(errCh)
 		defer close(doneCh)
+		defer slog.Debug("Stream goroutine cleaned up")
 
 		if service == nil {
 			errCh <- errRunnerNotConfigured
@@ -105,6 +113,8 @@ func startStreaming(prompt string, session coach.SessionContext, service *coach.
 			return
 		}
 
+		slog.Info("Starting generation pipeline", "prompt", prompt, "source", "User")
+
 		analysis, err := service.GenerateAnalysisWithContext(ctx, prompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -114,6 +124,8 @@ func startStreaming(prompt string, session coach.SessionContext, service *coach.
 			errCh <- err
 			return
 		}
+
+		slog.Debug("Thinking stage", "prompt", prompt, "analysis", analysis)
 
 		responseCh, responseErrCh, err := service.GenerateResponseWithContext(ctx, prompt, analysis, session)
 		if err != nil {
@@ -157,7 +169,7 @@ func startStreaming(prompt string, session coach.SessionContext, service *coach.
 	return tea.Batch(waitForToken(tokenCh), waitForErr(errCh), waitForStreamResult(doneCh)), tokenCh, errCh, doneCh, cancel
 }
 
-func startWelcomeStreaming(session coach.SessionContext, service *coach.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
+func startWelcomeStreaming(session agent.SessionContext, service *agent.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tokenCh := make(chan string)
 	errCh := make(chan error, 1)
@@ -167,11 +179,14 @@ func startWelcomeStreaming(session coach.SessionContext, service *coach.Service)
 		defer close(tokenCh)
 		defer close(errCh)
 		defer close(doneCh)
+		defer slog.Debug("Welcome stream goroutine cleaned up")
 
 		if service == nil {
 			errCh <- errRunnerNotConfigured
 			return
 		}
+
+		slog.Info("Generating welcome message...", "source", "System")
 
 		responseCh, responseErrCh, err := service.GenerateWelcomeWithContext(ctx, session)
 		if err != nil {

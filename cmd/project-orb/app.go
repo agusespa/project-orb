@@ -1,19 +1,21 @@
 package main
 
 import (
-	"project-orb/internal/coach"
+	"context"
+	"project-orb/internal/agent"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func newProgram(m model) *tea.Program {
-	return tea.NewProgram(m, tea.WithAltScreen())
+func newProgram(m model, ctx context.Context) *tea.Program {
+	m.shutdownCtx = ctx
+	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 }
 
 func initialModel() model {
-	defaultMode := coach.DefaultMode()
-	personaPath, err := coach.EnsurePersonaFile()
-	coachName, nameErr := coach.LoadCoachName()
+	defaultMode := agent.DefaultMode()
+	personaPath, err := agent.EnsurePersonaFile()
+	coachName, nameErr := agent.LoadCoachName()
 	if err == nil && nameErr != nil {
 		err = nameErr
 	}
@@ -21,7 +23,7 @@ func initialModel() model {
 		coachName = "Coach"
 	}
 
-	client, clientErr := coach.NewClient(coach.DefaultClientConfig())
+	client, clientErr := agent.NewClient(agent.DefaultClientConfig())
 	if err == nil && clientErr != nil {
 		err = clientErr
 	}
@@ -35,13 +37,13 @@ func initialModel() model {
 	})
 }
 
-func newRunnerFactory(client *coach.Client) runnerFactory {
-	return func(mode coach.Mode) (streamRunner, error) {
-		service, err := coach.NewService(client, mode)
+func newRunnerFactory(client *agent.Client) runnerFactory {
+	return func(mode agent.Mode) (streamRunner, error) {
+		service, err := agent.NewService(client, mode)
 		if err != nil {
 			return nil, err
 		}
 
-		return newCoachRunner(service), nil
+		return newAgentRunner(service), nil
 	}
 }

@@ -1,4 +1,4 @@
-package coach
+package agent
 
 import (
 	"strings"

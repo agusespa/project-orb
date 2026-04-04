@@ -1,4 +1,4 @@
-package coach
+package agent
 
 import (
 	"bufio"
@@ -252,12 +252,11 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 		return nil, nil, fmt.Errorf("llm server returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 
-	rawTokenCh := make(chan string)
-	filteredCh := make(chan string)
+	tokenCh := make(chan string)
 	errCh := make(chan error, 1)
 
 	go func() {
-		defer close(rawTokenCh)
+		defer close(tokenCh)
 		defer close(errCh)
 		defer resp.Body.Close()
 
@@ -265,6 +264,13 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		for scanner.Scan() {
+			// Check for cancellation before processing
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || !strings.HasPrefix(line, "data:") {
 				continue
@@ -293,7 +299,7 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 			select {
 			case <-ctx.Done():
 				return
-			case rawTokenCh <- token:
+			case tokenCh <- token:
 			}
 		}
 
@@ -302,77 +308,6 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 		}
 	}()
 
-	go filterThinkingTokens(rawTokenCh, filteredCh)
-
-	return filteredCh, errCh, nil
+	return tokenCh, errCh, nil
 }
 
-func filterThinkingTokens(in <-chan string, out chan<- string) {
-	defer close(out)
-
-	const (
-		openTag  = "<think>"
-		closeTag = "</think>"
-	)
-
-	var pending strings.Builder
-	inThink := false
-
-	flushVisible := func(s string) {
-		if s != "" {
-			out <- s
-		}
-	}
-
-	for token := range in {
-		pending.WriteString(token)
-
-		for {
-			current := pending.String()
-			if current == "" {
-				pending.Reset()
-				break
-			}
-
-			if inThink {
-				if idx := strings.Index(current, closeTag); idx >= 0 {
-					remaining := current[idx+len(closeTag):]
-					pending.Reset()
-					pending.WriteString(strings.TrimLeft(remaining, "\n\r\t "))
-					inThink = false
-					continue
-				}
-
-				keep := len(closeTag) - 1
-				if len(current) > keep {
-					current = current[len(current)-keep:]
-				}
-				pending.Reset()
-				pending.WriteString(current)
-				break
-			}
-
-			if idx := strings.Index(current, openTag); idx >= 0 {
-				flushVisible(current[:idx])
-				remaining := current[idx+len(openTag):]
-				pending.Reset()
-				pending.WriteString(remaining)
-				inThink = true
-				continue
-			}
-
-			keep := len(openTag) - 1
-			if len(current) > keep {
-				flushVisible(current[:len(current)-keep])
-				current = current[len(current)-keep:]
-			}
-			pending.Reset()
-			pending.WriteString(current)
-			break
-		}
-	}
-
-	if !inThink {
-		flushVisible(pending.String())
-	}
-}

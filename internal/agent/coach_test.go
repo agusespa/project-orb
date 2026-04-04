@@ -1,4 +1,4 @@
-package coach
+package agent
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 func TestServicePrepareSessionWithinLimit(t *testing.T) {
 	called := false
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		called = true
 		return "", nil
 	})
@@ -41,7 +41,7 @@ func TestServicePrepareSessionWithinLimit(t *testing.T) {
 func TestServicePrepareSessionCompactsOverflow(t *testing.T) {
 	var gotExisting string
 	var gotTurns []Turn
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		gotExisting = existingSummary
 		gotTurns = append([]Turn(nil), turns...)
 		return "new summary", nil
@@ -88,7 +88,7 @@ func TestServicePrepareSessionCompactsOverflow(t *testing.T) {
 
 func TestServicePrepareSessionPropagatesSummaryError(t *testing.T) {
 	wantErr := errors.New("summary failed")
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		return "", wantErr
 	})
 
@@ -114,7 +114,7 @@ func TestServicePrepareSessionPassesContextToSummarizer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(gotCtx context.Context, client *Client, mode Mode, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(gotCtx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		if !errors.Is(gotCtx.Err(), context.Canceled) {
 			t.Fatalf("expected canceled context, got %v", gotCtx.Err())
 		}

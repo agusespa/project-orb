@@ -1,4 +1,4 @@
-package coach
+package agent
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-type summarizer func(context.Context, *Client, Mode, string, []Turn) (string, error)
+type summarizer func(context.Context, *Client, string, []Turn) (string, error)
 
 type Service struct {
 	client    *Client
@@ -46,7 +46,7 @@ func (s *Service) PrepareSession(ctx context.Context, session *SessionContext) e
 	overflowCount := len(session.Recent) - maxRecentTurns
 	overflowTurns := append([]Turn(nil), session.Recent[:overflowCount]...)
 
-	summary, err := s.summarize(ctx, s.client, s.mode, session.Summary, overflowTurns)
+	summary, err := s.summarize(ctx, s.client, session.Summary, overflowTurns)
 	if err != nil {
 		return err
 	}

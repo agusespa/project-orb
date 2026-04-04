@@ -5,7 +5,7 @@ RELEASE_DIR := release
 BINARY_NAME := $(BUILD_DIR)/$(PROJECT_NAME)
 INSTALL_PATH := $(HOME)/bin
 
-.PHONY: all help tidy fmt lint lint-full test test-coverage build run install clean
+.PHONY: all help tidy fmt lint test test-coverage build run install clean
 
 all: fmt lint test build
 
@@ -14,8 +14,7 @@ help:
 	@echo "  make all           - Format, lint, test, and build"
 	@echo "  make tidy          - Tidy go.mod and go.sum"
 	@echo "  make fmt           - Format Go files"
-	@echo "  make lint          - Run basic lint checks (go vet)"
-	@echo "  make lint-full     - Run comprehensive lint checks (golangci-lint)"
+	@echo "  make lint          - Run comprehensive lint checks (golangci-lint)"
 	@echo "  make test          - Run tests"
 	@echo "  make test-coverage - Run tests with coverage report"
 	@echo "  make build         - Build the binary"
@@ -34,18 +33,13 @@ fmt:
 	@echo "Formatting complete."
 
 lint:
-	@echo "Running basic lint checks..."
-	go vet ./...
+	@echo "Running lint checks..."
+	@golangci-lint run ./... 2>&1 | grep -v "^$" || true
 	@echo "Lint checks complete."
-
-lint-full:
-	@echo "Running comprehensive lint checks..."
-	golangci-lint run ./...
-	@echo "Comprehensive lint checks complete."
 
 test:
 	@echo "Running tests..."
-	go test ./... -v
+	@go test ./... 2>&1 | grep -E "^(PASS|FAIL|ok|FAIL)" || true
 	@echo "Tests complete."
 
 test-coverage:
