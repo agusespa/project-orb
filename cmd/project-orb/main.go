@@ -8,8 +8,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"project-orb/internal/agent"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -60,12 +58,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get selected mode
-	selectedMode := getSelectedMode()
+	slog.Info("Starting agent...", "mode", globalSelectedMode)
 
-	slog.Info("Starting agent...", "mode", selectedMode)
-
-	p = newProgram(initialModelWithMode(selectedMode), ctx)
+	p = newProgram(initialModel(), ctx)
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("failed to start UI: %v\n", err)
 	}
@@ -80,39 +75,3 @@ func main() {
 }
 
 var globalSelectedMode string
-
-func getSelectedMode() string {
-	if globalSelectedMode == "" {
-		return "coach"
-	}
-	return globalSelectedMode
-}
-
-func initialModelWithMode(modeID string) model {
-	mode, found := agent.FindMode(modeID)
-	if !found {
-		mode = agent.DefaultMode()
-	}
-
-	personaPath, err := agent.EnsurePersonaFile()
-	agentName, nameErr := agent.LoadAgentName()
-	if err == nil && nameErr != nil {
-		err = nameErr
-	}
-	if agentName == "" {
-		agentName = "Agent"
-	}
-
-	client, clientErr := agent.NewClient(agent.DefaultClientConfig())
-	if err == nil && clientErr != nil {
-		err = clientErr
-	}
-
-	return newModel(modelDependencies{
-		runnerFactory: newRunnerFactory(client),
-		currentMode:   mode,
-		agentName:     agentName,
-		personaPath:   personaPath,
-		err:           err,
-	})
-}

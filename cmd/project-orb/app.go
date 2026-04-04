@@ -13,10 +13,13 @@ func newProgram(m model, ctx context.Context) *tea.Program {
 }
 
 func initialModel() model {
-	defaultMode := agent.DefaultMode()
+	// globalSelectedMode is guaranteed to be valid from the setup wizard
+	mode, _ := agent.FindMode(globalSelectedMode)
+
 	personaPath, err := agent.EnsurePersonaFile()
+
 	agentName, nameErr := agent.LoadAgentName()
-	if err == nil && nameErr != nil {
+	if nameErr != nil && err == nil {
 		err = nameErr
 	}
 	if agentName == "" {
@@ -24,13 +27,13 @@ func initialModel() model {
 	}
 
 	client, clientErr := agent.NewClient(agent.DefaultClientConfig())
-	if err == nil && clientErr != nil {
+	if clientErr != nil && err == nil {
 		err = clientErr
 	}
 
 	return newModel(modelDependencies{
 		runnerFactory: newRunnerFactory(client),
-		currentMode:   defaultMode,
+		currentMode:   mode,
 		agentName:     agentName,
 		personaPath:   personaPath,
 		err:           err,
