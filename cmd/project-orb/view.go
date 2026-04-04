@@ -11,66 +11,65 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const thinkingText = "Thinking..."
+const (
+	thinkingText           = "Thinking..."
+	chatPadding            = 2
+	inputHeight            = 3
+	statusBarHeight        = 1
+	maxModeSelectorLines   = 10
+	messageBlockWidthRatio = 0.82
 
-var thinkingFrames = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	contextGreenThreshold  = 60.0
+	contextYellowThreshold = 75.0
+	contextOrangeThreshold = 85.0
+)
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
 	}
 
-	contentWidth := max(1, m.width)
+	contentWidth := m.width - chatPadding
+	statusBar := m.renderStatusBar(m.width)
 
-	statusBar := m.renderStatusBar(contentWidth)
-	statusBarHeight := renderedLineCount(statusBar)
-
-	remainingHeight := max(2, m.height-statusBarHeight)
-	desiredInputPaneHeight := m.inputPaneHeight(contentWidth - 2)
-	maxInputHeight := max(3, remainingHeight/3)
-	inputPaneHeight := min(max(desiredInputPaneHeight, 1), max(1, min(maxInputHeight, remainingHeight-1)))
-
-	selectorMaxLines := 0
+	var modeSelector string
 	if m.modeSelectorActive {
-		selectorMaxLines = max(0, remainingHeight-inputPaneHeight-1)
+		modeSelector = m.renderModeSelector(m.width, maxModeSelectorLines)
 	}
-	modeSelector := m.renderModeSelectorWithLimit(contentWidth, selectorMaxLines)
-	selectorHeight := renderedLineCount(modeSelector)
-	chatPaneHeight := max(1, remainingHeight-inputPaneHeight-selectorHeight)
+
+	selectorHeight := lipgloss.Height(modeSelector)
+	chatHeight := max(1, m.height-inputHeight-selectorHeight-statusBarHeight)
 
 	chatPane := lipgloss.NewStyle().
-		Width(contentWidth).
-		Height(chatPaneHeight).
+		Width(m.width).
+		Height(chatHeight).
 		Padding(0, 1).
-		Render(m.renderChatContent(contentWidth-2, chatPaneHeight))
+		Render(m.renderChatContent(contentWidth, chatHeight))
 
 	inputPane := m.inputBox.
-		Width(contentWidth).
-		Height(max(1, inputPaneHeight-2)).
-		Render(m.renderInputContent(contentWidth-2, max(1, inputPaneHeight-2)))
+		Width(m.width).
+		Render(m.renderInputContent())
 
 	if modeSelector == "" {
 		return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, statusBar)
 	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, chatPane, inputPane, modeSelector, statusBar)
 }
 
 func (m model) renderChatContent(width int, maxLines int) string {
-	var b strings.Builder
+	var blocks []string
 
 	if status := strings.TrimSpace(m.statusMessage); status != "" {
-		b.WriteString(m.metaStyle.Render(status))
-		b.WriteString("\n")
+		blocks = append(blocks, m.metaStyle.Render(status))
 	}
 
 	if summary := strings.TrimSpace(m.session.Summary); summary != "" {
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(m.summaryTitleStyle.Render("Conversation summary"))
-		b.WriteString("\n")
-		b.WriteString(m.summaryBodyStyle.Render(summary))
-		b.WriteString("\n")
+		summaryBlock := lipgloss.JoinVertical(lipgloss.Left,
+			m.summaryTitleStyle.Render("Conversation summary"),
+			m.summaryBodyStyle.Render(summary),
+		)
+		blocks = append(blocks, summaryBlock)
 	}
 
 	for _, turn := range m.session.Recent {
@@ -79,83 +78,71 @@ func (m model) renderChatContent(width int, maxLines int) string {
 		if user == "" && assistant == "" {
 			continue
 		}
-		b.WriteString("\n\n")
 		if user != "" {
-			b.WriteString(m.renderUserBlock(width, "You", turn.User))
-			b.WriteString("\n")
-		}
-		if user != "" && assistant != "" {
-			b.WriteString("\n\n")
+			blocks = append(blocks, m.renderUserBlock(width, "You", turn.User))
 		}
 		if assistant != "" {
-			b.WriteString(m.renderAgentBlock(width, m.agentName, turn.Assistant))
-			b.WriteString("\n")
+			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, turn.Assistant))
 		}
 	}
 
 	if currentPrompt := strings.TrimSpace(m.pendingPrompt); currentPrompt != "" && m.streaming {
-		b.WriteString("\n\n")
-		b.WriteString(m.renderUserBlock(width, "You", currentPrompt))
-		b.WriteString("\n")
+		blocks = append(blocks, m.renderUserBlock(width, "You", currentPrompt))
 	}
 
 	if m.err != nil {
-		b.WriteString("\n")
-		b.WriteString(m.errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-		b.WriteString("\n")
+		blocks = append(blocks, m.errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 	}
 
 	currentOutput := strings.TrimSpace(m.output)
 	if currentOutput != "" || m.streaming {
-		b.WriteString("\n\n")
 		if m.streaming && m.waitingForFirstToken {
-			b.WriteString(m.renderAgentThinking(width, m.agentName, thinkingFrames[m.spinnerFrame]))
+			blocks = append(blocks, m.renderAgentThinking(width, m.agentName, m.spinnerFrame))
 		} else if currentOutput == "" {
-			b.WriteString(m.renderAgentBlock(width, m.agentName, " "))
+			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, " "))
 		} else {
-			b.WriteString(m.renderAgentBlock(width, m.agentName, currentOutput))
+			blocks = append(blocks, m.renderAgentBlock(width, m.agentName, currentOutput))
 		}
 	}
 
-	if b.Len() == 0 {
+	if len(blocks) == 0 {
 		return ""
 	}
 
-	return ui.TailLines(b.String(), max(1, maxLines))
-}
+	content := lipgloss.JoinVertical(lipgloss.Left, blocks...)
 
-func (m model) renderInputContent(width int, maxLines int) string {
-	var b strings.Builder
-
-	b.WriteString("› ")
-
-	lines := m.renderableInputLines(width)
-	if m.input == "" && !m.streaming {
-		lines[0] = ui.NeutralMetaStyle.Render(lines[0])
+	lines := strings.Split(content, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+		content = strings.Join(lines, "\n")
 	}
 
-	b.WriteString(strings.Join(lines, "\n  "))
-
-	return ui.FitToLines(b.String(), max(1, maxLines), width)
+	return content
 }
 
-func (m model) renderModeSelector(width int) string {
-	// Each mode takes 1 line, plus title line
-	return m.renderModeSelectorWithLimit(width, max(1, len(agent.BuiltInModes())+2))
-}
-
-func (m model) renderModeSelectorWithLimit(width int, maxLines int) string {
-	if !m.modeSelectorActive {
-		return ""
+func (m model) renderInputContent() string {
+	text := m.input
+	if text == "" && !m.streaming {
+		text = ui.InputCursor + "Type your message and press Enter"
+		text = lipgloss.NewStyle().Foreground(lipgloss.Color(ui.ColorSubdued)).Italic(true).Render(text)
+	} else if !m.streaming {
+		text = m.input + ui.InputCursor
 	}
-	if maxLines <= 2 {
+
+	theme := ui.ThemeForMode(m.currentMode.ID)
+	prompt := lipgloss.NewStyle().Foreground(theme.Border).Bold(true).Render("▸ ")
+
+	return prompt + text
+}
+
+func (m model) renderModeSelector(width int, maxLines int) string {
+	if !m.modeSelectorActive || maxLines <= 2 {
 		return ""
 	}
 
 	matches := m.currentModeMatches()
 	var lines []string
 
-	// Title with hint on the same line
 	title := "Select Mode"
 	hint := "↑↓ move · ⏎ switch · esc cancel"
 	titleLine := ui.NeutralSelectorTitleStyle.Render(title) + "  " + ui.NeutralHelpStyle.Render(hint)
@@ -167,26 +154,7 @@ func (m model) renderModeSelectorWithLimit(width int, maxLines int) string {
 			prefix = "> "
 		}
 
-		// Choose style based on whether it's current mode and/or highlighted
-		var nameStyle lipgloss.Style
-		isCurrent := mode.ID == m.currentMode.ID
-		isHighlighted := i == m.modeSelectorIndex
-
-		if isCurrent {
-			// Current mode uses its theme color, bold
-			theme := ui.ThemeForMode(mode.ID)
-			nameStyle = lipgloss.NewStyle().
-				Foreground(theme.StatusFg).
-				Bold(true)
-		} else if isHighlighted {
-			// Highlighted mode uses white, bold
-			nameStyle = ui.SelectorModeNameHighlightStyle
-		} else {
-			// Other modes use regular gray
-			nameStyle = ui.SelectorModeNameStyle
-		}
-
-		// Build the line: prefix + name + description
+		nameStyle := m.getModeNameStyle(mode.ID, i)
 		line := prefix + nameStyle.Render(mode.Name)
 		if mode.Description != "" {
 			line += " " + ui.SelectorDescriptionStyle.Render(mode.Description)
@@ -199,12 +167,26 @@ func (m model) renderModeSelectorWithLimit(width int, maxLines int) string {
 		lines = append(lines, m.errorStyle.Render("No matching modes"))
 	}
 
-	content := ui.FitToLines(strings.Join(lines, "\n"), maxLines-2, width)
-	if content == "" {
-		return ""
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
 	}
 
+	content := strings.Join(lines, "\n")
 	return m.selectorBoxStyle.Width(width).Render(content)
+}
+
+func (m model) getModeNameStyle(modeID agent.ModeID, index int) lipgloss.Style {
+	isCurrent := modeID == m.currentMode.ID
+	isHighlighted := index == m.modeSelectorIndex
+
+	if isCurrent {
+		theme := ui.ThemeForMode(modeID)
+		return lipgloss.NewStyle().Foreground(theme.StatusFg).Bold(true)
+	}
+	if isHighlighted {
+		return ui.SelectorModeNameHighlightStyle
+	}
+	return ui.SelectorModeNameStyle
 }
 
 func (m model) renderStatusBar(width int) string {
@@ -212,104 +194,71 @@ func (m model) renderStatusBar(width int) string {
 		return ""
 	}
 
-	var parts []string
-
-	// Mode name (colored)
 	theme := ui.ThemeForMode(m.currentMode.ID)
-	modeStyle := lipgloss.NewStyle().Foreground(theme.StatusFg).Bold(true)
-	parts = append(parts, modeStyle.Render(m.currentMode.Name+" Mode"))
 
-	// Context usage (gray label, colored percentage)
+	modeName := lipgloss.NewStyle().
+		Foreground(theme.StatusFg).
+		Bold(true).
+		Render(m.currentMode.Name + " Mode")
+
 	percent := m.session.ContextUsagePercent()
+	contextInfo := m.renderContextUsage(percent)
 
-	var color lipgloss.Color
-	switch {
-	case percent < 60:
-		color = lipgloss.Color("10") // Green
-	case percent < 75:
-		color = lipgloss.Color("11") // Yellow
-	case percent < 85:
-		color = lipgloss.Color("214") // Orange
-	default:
-		color = lipgloss.Color("9") // Red
-	}
-
-	grayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	percentStyle := lipgloss.NewStyle().Foreground(color)
-	contextInfo := grayStyle.Render("ctx ") + percentStyle.Render(fmt.Sprintf("%.0f%%", percent))
-	parts = append(parts, contextInfo)
-
-	// Help hints
 	hints := ui.NeutralHelpStyle.Render("⏎ send · esc cancel · / cmd · ^C quit")
-	parts = append(parts, hints)
 
-	// Join with pipe separator
-	content := strings.Join(parts, " | ")
-
+	content := strings.Join([]string{modeName, contextInfo, hints}, " | ")
 	return m.statusBarStyle.Width(width).Render(content)
 }
 
-func renderedLineCount(s string) int {
-	if s == "" {
-		return 0
+func (m model) renderContextUsage(percent float64) string {
+	var color lipgloss.Color
+	switch {
+	case percent < contextGreenThreshold:
+		color = lipgloss.Color(ui.ColorSuccess)
+	case percent < contextYellowThreshold:
+		color = lipgloss.Color(ui.ColorWarning)
+	case percent < contextOrangeThreshold:
+		color = lipgloss.Color(ui.ColorCaution)
+	default:
+		color = lipgloss.Color(ui.ColorDanger)
 	}
 
-	return lipgloss.Height(s)
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.ColorSubdued)).Render("ctx ")
+	value := lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%.0f%%", percent))
+	return label + value
 }
 
 func (m model) renderUserBlock(width int, label string, body string) string {
-	contentWidth := ui.MessageBlockWidth(width, 0.82)
-	name := m.renderSpeakerName(m.userNameStyle, label)
-	message := m.userBodyStyle.Render(
-		lipgloss.NewStyle().
-			Width(contentWidth).
-			Align(lipgloss.Right).
-			Render(body),
-	)
-	bubble := lipgloss.NewStyle().
-		MaxWidth(contentWidth).
-		Align(lipgloss.Right).
-		Render(name + "\n\n" + message)
+	contentWidth := int(float64(width) * messageBlockWidthRatio)
 
-	return lipgloss.PlaceHorizontal(width, lipgloss.Right, bubble)
+	name := m.userNameStyle.Render(strings.ToUpper(label))
+	message := m.userBodyStyle.Width(contentWidth).Align(lipgloss.Right).Render(body)
+
+	content := lipgloss.NewStyle().
+		Width(contentWidth).
+		Align(lipgloss.Right).
+		MarginTop(1).
+		Render(lipgloss.JoinVertical(lipgloss.Right, name, message))
+
+	return lipgloss.PlaceHorizontal(width, lipgloss.Right, content)
 }
 
 func (m model) renderAgentBlock(width int, label string, body string) string {
-	contentWidth := ui.MessageBlockWidth(width, 0.82)
-	name := m.renderSpeakerName(m.agentNameStyle, label)
-	message := m.agentBodyStyle.Render(
-		lipgloss.NewStyle().
-			Width(contentWidth).
-			Align(lipgloss.Left).
-			Render(body),
-	)
-	bubble := lipgloss.NewStyle().
-		MaxWidth(contentWidth).
-		Align(lipgloss.Left).
-		Render(name + "\n\n" + message)
+	contentWidth := int(float64(width) * messageBlockWidthRatio)
 
-	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
+	name := m.agentNameStyle.Render(strings.ToUpper(label))
+	message := m.agentBodyStyle.Width(contentWidth).Render(body)
+
+	content := lipgloss.NewStyle().
+		Width(contentWidth).
+		MarginTop(1).
+		Render(lipgloss.JoinVertical(lipgloss.Left, name, message))
+
+	return lipgloss.PlaceHorizontal(width, lipgloss.Left, content)
 }
 
 func (m model) renderAgentThinking(width int, label string, frame int) string {
-	contentWidth := ui.MessageBlockWidth(width, 0.82)
-	name := m.renderSpeakerName(m.agentNameStyle, label)
-	message := m.agentBodyStyle.Render(
-		lipgloss.NewStyle().
-			Width(contentWidth).
-			Align(lipgloss.Left).
-			Render(m.renderThinkingSweep(frame)),
-	)
-	bubble := lipgloss.NewStyle().
-		MaxWidth(contentWidth).
-		Align(lipgloss.Left).
-		Render(name + "\n\n" + message)
-
-	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bubble)
-}
-
-func (m model) renderSpeakerName(style lipgloss.Style, label string) string {
-	return style.Render(strings.ToUpper(label))
+	return m.renderAgentBlock(width, label, m.renderThinkingSweep(frame))
 }
 
 func (m model) renderThinkingSweep(frame int) string {
@@ -322,27 +271,22 @@ func (m model) renderThinkingSweep(frame int) string {
 	var b strings.Builder
 
 	for i, r := range runes {
-		color := thinkingSweepColor(int(math.Abs(float64(i - highlight))))
-		b.WriteString(lipgloss.NewStyle().
-			Bold(true).
-			Foreground(color).
-			Render(string(r)))
+		distance := int(math.Abs(float64(i - highlight)))
+		var color lipgloss.Color
+		switch distance {
+		case 0:
+			color = lipgloss.Color("255")
+		case 1:
+			color = lipgloss.Color("252")
+		case 2:
+			color = lipgloss.Color("250")
+		default:
+			color = lipgloss.Color("245")
+		}
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
 	}
 
 	return b.String()
-}
-
-func thinkingSweepColor(distance int) lipgloss.Color {
-	switch distance {
-	case 0:
-		return lipgloss.Color("255")
-	case 1:
-		return lipgloss.Color("252")
-	case 2:
-		return lipgloss.Color("250")
-	default:
-		return lipgloss.Color("245")
-	}
 }
 
 func matchingModes(query string) []agent.Mode {

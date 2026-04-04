@@ -421,7 +421,7 @@ func TestRenderModeSelectorShowsWhenTypingModeCommand(t *testing.T) {
 	m.input = "/mode"
 	m.modeSelectorActive = true
 
-	got := m.renderModeSelector(80)
+	got := m.renderModeSelector(80, 10)
 	if !strings.Contains(got, "Select Mode") {
 		t.Fatalf("expected mode selector heading, got %q", got)
 	}
@@ -438,7 +438,7 @@ func TestRenderModeSelectorFiltersByTypedModeName(t *testing.T) {
 	m.input = "/mode ana"
 	m.modeSelectorActive = true
 
-	got := m.renderModeSelector(80)
+	got := m.renderModeSelector(80, 10)
 	if !strings.Contains(got, "Analyst") {
 		t.Fatalf("expected analyst option, got %q", got)
 	}

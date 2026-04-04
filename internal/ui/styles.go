@@ -6,6 +6,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const InputCursor = "█"
+
+const (
+	ColorSubdued  = "240"
+	ColorMuted    = "245"
+	ColorBright   = "250"
+	ColorText     = "252"
+	ColorEmphasis = "255"
+	ColorError    = "203"
+
+	ColorSuccess = "10"
+	ColorWarning = "11"
+	ColorCaution = "214"
+	ColorDanger  = "9"
+)
+
 type Styles struct {
 	InputBox          lipgloss.Style
 	SelectorBoxStyle  lipgloss.Style
@@ -21,31 +37,30 @@ type Styles struct {
 	CoachBodyStyle    lipgloss.Style
 }
 
-// Neutral styles for UI chrome (selector, footer)
 var NeutralSelectorBoxStyle = lipgloss.NewStyle().
 	Border(lipgloss.NormalBorder()).
-	BorderForeground(lipgloss.Color("240")).
+	BorderForeground(lipgloss.Color(ColorSubdued)).
 	Padding(0, 1)
 
 var NeutralHelpStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("245"))
+	Foreground(lipgloss.Color(ColorMuted))
 
 var NeutralMetaStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("245"))
+	Foreground(lipgloss.Color(ColorMuted))
 
 var NeutralSelectorTitleStyle = lipgloss.NewStyle().
 	Bold(true).
-	Foreground(lipgloss.Color("250"))
+	Foreground(lipgloss.Color(ColorBright))
 
 var SelectorModeNameStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("252"))
+	Foreground(lipgloss.Color(ColorText))
 
 var SelectorModeNameHighlightStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("255")).
+	Foreground(lipgloss.Color(ColorEmphasis)).
 	Bold(true)
 
 var SelectorDescriptionStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("240")).
+	Foreground(lipgloss.Color(ColorSubdued)).
 	Italic(true)
 
 type ModeTheme struct {
@@ -60,7 +75,6 @@ type ModeTheme struct {
 func ThemeForMode(id agent.ModeID) ModeTheme {
 	switch id {
 	case agent.ModePerformanceReview:
-		// Dynamic, energetic: orange / yellow tones
 		return ModeTheme{
 			Border:         lipgloss.Color("172"),
 			StatusFg:       lipgloss.Color("214"),
@@ -70,7 +84,6 @@ func ThemeForMode(id agent.ModeID) ModeTheme {
 			CoachNameFg:    lipgloss.Color("208"),
 		}
 	case agent.ModeCoach:
-		// Grounded, growing: green tones
 		return ModeTheme{
 			Border:         lipgloss.Color("71"),
 			StatusFg:       lipgloss.Color("114"),
@@ -80,7 +93,6 @@ func ThemeForMode(id agent.ModeID) ModeTheme {
 			CoachNameFg:    lipgloss.Color("71"),
 		}
 	default:
-		// Analyst: cerebral blue/purple tones (original palette)
 		return ModeTheme{
 			Border:         lipgloss.Color("61"),
 			StatusFg:       lipgloss.Color("147"),
@@ -98,9 +110,7 @@ func NewStyles(id agent.ModeID) Styles {
 		InputBox: lipgloss.NewStyle().
 			BorderTop(true).
 			BorderBottom(true).
-			BorderLeft(false).
-			BorderRight(false).
-			BorderStyle(lipgloss.NormalBorder()).
+			BorderStyle(lipgloss.ThickBorder()).
 			BorderForeground(t.Border).
 			Padding(0, 1),
 		SelectorBoxStyle: NeutralSelectorBoxStyle,
@@ -109,7 +119,7 @@ func NewStyles(id agent.ModeID) Styles {
 			Bold(true),
 		HelpStyle: NeutralHelpStyle,
 		ErrorStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("203")).
+			Foreground(lipgloss.Color(ColorError)).
 			Bold(true),
 		MetaStyle: NeutralMetaStyle,
 		SummaryTitleStyle: lipgloss.NewStyle().
@@ -124,8 +134,8 @@ func NewStyles(id agent.ModeID) Styles {
 			Bold(true).
 			Foreground(t.CoachNameFg),
 		UserBodyStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252")),
+			Foreground(lipgloss.Color(ColorText)),
 		CoachBodyStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("255")),
+			Foreground(lipgloss.Color(ColorEmphasis)),
 	}
 }

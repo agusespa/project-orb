@@ -131,7 +131,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.streaming {
 			return m, nil
 		}
-		m.spinnerFrame = (m.spinnerFrame + 1) % len(thinkingFrames)
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(thinkingText)
 		return m, spinnerTick()
 	case startWelcomeMsg:
 		return m.startWelcome()
