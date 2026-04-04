@@ -144,10 +144,6 @@ func (m model) renderInputContent(width int, maxLines int) string {
 	return ui.FitToLines(b.String(), max(1, maxLines), width)
 }
 
-func (m model) renderFooter(width int) string {
-	return m.renderFooterWithLimit(width, 3)
-}
-
 func (m model) renderFooterWithLimit(width int, maxLines int) string {
 	if maxLines <= 0 {
 		return ""

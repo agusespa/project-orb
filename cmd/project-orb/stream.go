@@ -83,7 +83,7 @@ func waitForStreamResult(ch <-chan streamResult) tea.Cmd {
 		if !ok {
 			return doneChannelClosedMsg{}
 		}
-		return streamDoneMsg{session: result.session, canceled: result.canceled}
+		return streamDoneMsg(result)
 	}
 }
 

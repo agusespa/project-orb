@@ -87,7 +87,6 @@ func WrapInputText(s string, width int) []string {
 
 			if current != "" {
 				out = append(out, current)
-				current = ""
 			}
 
 			if RuneLen(token) <= width {

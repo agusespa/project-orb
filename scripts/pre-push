@@ -9,7 +9,7 @@ go mod verify > /dev/null 2>&1 || { echo "ERROR: Module verification failed"; ex
 go mod tidy > /dev/null 2>&1
 
 echo ">> Running linter..."
-golangci-lint run > /dev/null 2>&1 || { echo "ERROR: Lint failed"; exit 1; }
+go run github.com/golangci/golangci-lint/cmd/golangci-lint run > /dev/null 2>&1 || { echo "ERROR: Lint failed"; exit 1; }
 
 echo ">> Running tests..."
 go test ./... > /dev/null 2>&1 || { echo "ERROR: Tests failed"; exit 1; }
@@ -22,7 +22,7 @@ go build -o /dev/null ./... > /dev/null 2>&1 || { echo "ERROR: Build failed"; ex
 
 if command -v govulncheck >/dev/null 2>&1; then
     echo ">> Running security audit..."
-    govulncheck ./... > /dev/null 2>&1 || { echo "ERROR: Security audit failed"; exit 1; }
+    go run golang.org/x/vuln/cmd/govulncheck ./... > /dev/null 2>&1 || { echo "ERROR: Security audit failed"; exit 1; }
 fi
 
 echo "✓ All checks passed!"
