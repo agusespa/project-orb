@@ -21,8 +21,8 @@ type Mode struct {
 	Instructions string
 }
 
-//go:embed prompts/agent_instructions.md
-var agentInstructions string
+//go:embed prompts/coach_instructions.md
+var coachInstructions string
 
 //go:embed prompts/performance_review_instructions.md
 var performanceReviewInstructions string
@@ -36,7 +36,7 @@ func BuiltInModes() []Mode {
 			ID:           ModeCoach,
 			Name:         "Coach",
 			Description:  "Guidance for everyday reflection, decisions, and next steps.",
-			Instructions: agentInstructions,
+			Instructions: coachInstructions,
 		},
 		{
 			ID:           ModePerformanceReview,

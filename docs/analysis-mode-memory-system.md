@@ -2,7 +2,7 @@
 
 ## Overview
 
-Analysis mode provides a sophisticated memory system that enables continuous performance tracking and contextual feedback across sessions. The system persists session data, generates summaries, and uses vector search to provide relevant historical context during conversations.
+Analysis mode provides a memory system that enables continuous performance tracking and contextual feedback across sessions. The system persists session data, generates summaries, and uses vector search to provide relevant historical context during conversations.
 
 ## Session Lifecycle
 
@@ -47,12 +47,6 @@ On session end:
 ### Session Markdown Format
 ```markdown
 # Analysis Session - [Date/Time]
-
-## Metadata
-- Start: [timestamp]
-- End: [timestamp]
-- Duration: [duration]
-- Topics: [extracted topics]
 
 ## Conversation
 [Full conversation transcript with timestamps]
@@ -124,40 +118,3 @@ During a session, when discussing specific topics:
 3. Filter by relevance score (threshold TBD)
 4. Present relevant historical context to agent
 5. Agent uses this to provide feedback on progress/patterns
-
-## Context Loading
-
-### On Session Start
-1. Load most recent session summary (if exists)
-2. Query vector DB for any high-priority unresolved items
-3. Present context to agent with options:
-   - Continue previous analysis
-   - Start new topic
-   - Review specific past insights
-
-### During Session
-- Agent can trigger vector search when:
-  - User mentions specific topics/areas
-  - Discussing progress or changes
-  - Comparing current state to past observations
-- Search results provided as additional context
-- Agent synthesizes historical and current information
-
-## User Control
-
-### Commands
-- `/end-session` - Explicitly end current session and save
-- `/session-history` - View past session summaries
-
-## llama.cpp Management
-
-### Configuration
-Config file at `~/.config/project-orb/config.yaml`:
-```yaml
-llama_cpp:
-  models_dir: "/path/to/models"
-  chat_model: "chat-model.gguf"
-  embedding_model: "nomic-embed-text.gguf"
-  chat_port: 8080
-  embedding_port: 8081
-```

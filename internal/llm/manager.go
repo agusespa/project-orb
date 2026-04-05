@@ -18,13 +18,10 @@ import (
 const (
 	healthCheckInterval = 500 * time.Millisecond
 	serverStartTimeout  = 5 * time.Minute
+	processKillWaitTime = 100 * time.Millisecond
 )
 
-const processKillWaitTime = 100 * time.Millisecond
-
-// killExistingServerOnPort kills any llama-server process listening on the given port
 func killExistingServerOnPort(port int) {
-	// First try to find by port using lsof
 	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))
 	output, err := cmd.Output()
 	if err == nil && len(output) > 0 {
@@ -45,7 +42,6 @@ func killExistingServerOnPort(port int) {
 		}
 	}
 
-	// Also check for any llama-server processes with this port in args
 	psCmd := exec.Command("pgrep", "-f", fmt.Sprintf("llama-server.*--port %d", port))
 	psOutput, err := psCmd.Output()
 	if err == nil && len(psOutput) > 0 {
@@ -70,18 +66,18 @@ func killExistingServerOnPort(port int) {
 	}
 }
 
+type serverInstance struct {
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	done   chan struct{}
+}
+
 type Manager struct {
 	config *Config
 
-	chatCmd    *exec.Cmd
-	chatCancel context.CancelFunc
-	chatMu     sync.Mutex
-	chatDone   chan struct{}
-
-	embeddingCmd    *exec.Cmd
-	embeddingCancel context.CancelFunc
-	embeddingMu     sync.Mutex
-	embeddingDone   chan struct{}
+	chat      serverInstance
+	embedding serverInstance
 }
 
 func NewManager(config *Config) (*Manager, error) {
@@ -98,28 +94,9 @@ func NewManager(config *Config) (*Manager, error) {
 	}, nil
 }
 
-// StartChatServer starts the llama.cpp server for chat
 func (m *Manager) StartChatServer(ctx context.Context) error {
-	m.chatMu.Lock()
-	defer m.chatMu.Unlock()
-
-	if m.chatCmd != nil {
-		return fmt.Errorf("chat server already running")
-	}
-
-	killExistingServerOnPort(m.config.LlamaCpp.ChatPort)
-
-	slog.Info("Starting chat server", "model", m.config.ChatModelPath(), "port", m.config.LlamaCpp.ChatPort)
-
-	cmdCtx, cancel := context.WithCancel(ctx)
-	m.chatCancel = cancel
-	m.chatDone = make(chan struct{})
-
-	cmd := exec.CommandContext(
-		cmdCtx,
-		"llama-server",
+	args := []string{
 		"-m", m.config.ChatModelPath(),
-		"--alias", "local-model",
 		"--port", fmt.Sprintf("%d", m.config.LlamaCpp.ChatPort),
 		"--host", "127.0.0.1",
 		"-c", "32768", // context size
@@ -135,186 +112,167 @@ func (m *Manager) StartChatServer(ctx context.Context) error {
 		"-fa", "auto", // Flash Attention for Apple Silicon optimization
 		"--jinja", // enable jinja2 template support
 		"--chat-template-kwargs", `{"enable_thinking":false}`,
+	}
+
+	return m.startServer(
+		ctx,
+		&m.chat,
+		"chat",
+		m.config.LlamaCpp.ChatPort,
+		m.config.ChatModelPath(),
+		args,
+		func(port int) error { return m.waitForChatServer(port) },
 	)
-
-	slog.Info("Executing command", "cmd", cmd.String())
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		close(m.chatDone)
-		return fmt.Errorf("start chat server: %w", err)
-	}
-
-	m.chatCmd = cmd
-
-	// Wait for server to be ready
-	if err := m.waitForChatServer(m.config.LlamaCpp.ChatPort); err != nil {
-		_ = m.stopChatServer()
-		return fmt.Errorf("chat server failed to start: %w", err)
-	}
-
-	slog.Info("Chat server ready", "port", m.config.LlamaCpp.ChatPort)
-
-	// Monitor process in background
-	go func() {
-		defer close(m.chatDone)
-		if err := cmd.Wait(); err != nil && cmdCtx.Err() == nil {
-			slog.Error("Chat server exited unexpectedly", "error", err)
-		}
-	}()
-
-	return nil
 }
 
-// StartEmbeddingServer starts the llama.cpp server for embeddings
 func (m *Manager) StartEmbeddingServer(ctx context.Context) error {
-	m.embeddingMu.Lock()
-	defer m.embeddingMu.Unlock()
-
-	if m.embeddingCmd != nil {
-		return fmt.Errorf("embedding server already running")
-	}
-
-	killExistingServerOnPort(m.config.LlamaCpp.EmbeddingPort)
-
-	slog.Info("Starting embedding server", "model", m.config.EmbeddingModelPath(), "port", m.config.LlamaCpp.EmbeddingPort)
-
-	cmdCtx, cancel := context.WithCancel(ctx)
-	m.embeddingCancel = cancel
-	m.embeddingDone = make(chan struct{})
-
-	cmd := exec.CommandContext(
-		cmdCtx,
-		"llama-server",
+	args := []string{
 		"-m", m.config.EmbeddingModelPath(),
 		"--port", fmt.Sprintf("%d", m.config.LlamaCpp.EmbeddingPort),
 		"--host", "127.0.0.1",
 		"--embedding",
 		"-ngl", "99",
+	}
+
+	return m.startServer(
+		ctx,
+		&m.embedding,
+		"embedding",
+		m.config.LlamaCpp.EmbeddingPort,
+		m.config.EmbeddingModelPath(),
+		args,
+		func(port int) error { return m.waitForEmbeddingServer(port) },
 	)
+}
+
+func (m *Manager) startServer(
+	ctx context.Context,
+	instance *serverInstance,
+	serverType string,
+	port int,
+	modelPath string,
+	args []string,
+	waitFunc func(int) error,
+) error {
+	instance.mu.Lock()
+	defer instance.mu.Unlock()
+
+	if instance.cmd != nil {
+		return fmt.Errorf("%s server already running", serverType)
+	}
+
+	killExistingServerOnPort(port)
+
+	slog.Info("Starting server", "type", serverType, "model", modelPath, "port", port)
+
+	cmdCtx, cancel := context.WithCancel(ctx)
+	instance.cancel = cancel
+	instance.done = make(chan struct{})
+
+	cmd := exec.CommandContext(cmdCtx, "llama-server", args...)
+
+	slog.Info("Executing command", "cmd", cmd.String())
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		close(m.embeddingDone)
-		return fmt.Errorf("start embedding server: %w", err)
+		close(instance.done)
+		return fmt.Errorf("start %s server: %w", serverType, err)
 	}
 
-	m.embeddingCmd = cmd
+	instance.cmd = cmd
 
-	// Wait for server to be ready
-	if err := m.waitForEmbeddingServer(m.config.LlamaCpp.EmbeddingPort); err != nil {
-		_ = m.stopEmbeddingServer()
-		return fmt.Errorf("embedding server failed to start: %w", err)
-	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, serverStartTimeout)
+	defer waitCancel()
 
-	slog.Info("Embedding server ready", "port", m.config.LlamaCpp.EmbeddingPort)
-
-	// Monitor process in background
+	waitDone := make(chan error, 1)
 	go func() {
-		defer close(m.embeddingDone)
+		waitDone <- waitFunc(port)
+	}()
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			_ = m.stopServerLocked(instance, serverType)
+			return fmt.Errorf("%s server failed to start: %w", serverType, err)
+		}
+	case <-waitCtx.Done():
+		_ = m.stopServerLocked(instance, serverType)
+		if ctx.Err() != nil {
+			// Parent context was cancelled (e.g., user pressed Ctrl+C)
+			return fmt.Errorf("%s server startup cancelled", serverType)
+		}
+		return fmt.Errorf("%s server startup timeout after %v", serverType, serverStartTimeout)
+	}
+
+	slog.Info("Server ready", "type", serverType, "port", port)
+
+	go func() {
+		defer close(instance.done)
 		if err := cmd.Wait(); err != nil && cmdCtx.Err() == nil {
-			slog.Error("Embedding server exited unexpectedly", "error", err)
+			slog.Error("Server exited unexpectedly", "type", serverType, "error", err)
 		}
 	}()
 
 	return nil
 }
 
-// StopChatServer stops the chat server
 func (m *Manager) StopChatServer() error {
-	m.chatMu.Lock()
-	defer m.chatMu.Unlock()
-	return m.stopChatServer()
+	m.chat.mu.Lock()
+	defer m.chat.mu.Unlock()
+	return m.stopServerLocked(&m.chat, "chat")
 }
 
-func (m *Manager) stopChatServer() error {
-	if m.chatCmd == nil {
-		slog.Info("Chat server already stopped or not started")
-		return nil
-	}
-
-	if m.chatCmd.Process != nil {
-		slog.Info("Stopping chat server", "pid", m.chatCmd.Process.Pid)
-	} else {
-		slog.Info("Stopping chat server (no process)")
-	}
-
-	// Cancel context first
-	if m.chatCancel != nil {
-		m.chatCancel()
-	}
-
-	// Kill the process
-	if m.chatCmd.Process != nil {
-		pid := m.chatCmd.Process.Pid
-		if err := m.chatCmd.Process.Kill(); err != nil {
-			slog.Error("Failed to kill chat server process", "error", err, "pid", pid)
-		} else {
-			slog.Info("Chat server process killed", "pid", pid)
-		}
-	}
-
-	// Wait for goroutine to finish
-	if m.chatDone != nil {
-		<-m.chatDone
-	}
-
-	m.chatCmd = nil
-	m.chatCancel = nil
-	m.chatDone = nil
-
-	slog.Info("Chat server stopped")
-	return nil
-}
-
-// StopEmbeddingServer stops the embedding server
 func (m *Manager) StopEmbeddingServer() error {
-	m.embeddingMu.Lock()
-	defer m.embeddingMu.Unlock()
-	return m.stopEmbeddingServer()
+	m.embedding.mu.Lock()
+	defer m.embedding.mu.Unlock()
+	return m.stopServerLocked(&m.embedding, "embedding")
 }
 
-func (m *Manager) stopEmbeddingServer() error {
-	if m.embeddingCmd == nil {
-		slog.Info("Embedding server already stopped or not started")
+func (m *Manager) stopServerLocked(instance *serverInstance, serverType string) error {
+	if instance.cmd == nil {
+		slog.Info("Server already stopped or not started", "type", serverType)
 		return nil
 	}
 
-	if m.embeddingCmd.Process != nil {
-		slog.Info("Stopping embedding server", "pid", m.embeddingCmd.Process.Pid)
+	if instance.cmd.Process != nil {
+		slog.Info("Stopping server", "type", serverType, "pid", instance.cmd.Process.Pid)
 	} else {
-		slog.Info("Stopping embedding server (no process)")
+		slog.Info("Stopping server (no process)", "type", serverType)
 	}
 
-	// Cancel context first
-	if m.embeddingCancel != nil {
-		m.embeddingCancel()
+	// Cancel the context first to signal the process to stop
+	if instance.cancel != nil {
+		instance.cancel()
 	}
 
 	// Kill the process
-	if m.embeddingCmd.Process != nil {
-		pid := m.embeddingCmd.Process.Pid
-		if err := m.embeddingCmd.Process.Kill(); err != nil {
-			slog.Error("Failed to kill embedding server process", "error", err, "pid", pid)
+	if instance.cmd.Process != nil {
+		pid := instance.cmd.Process.Pid
+		if err := instance.cmd.Process.Kill(); err != nil {
+			slog.Error("Failed to kill server process", "type", serverType, "error", err, "pid", pid)
 		} else {
-			slog.Info("Embedding server process killed", "pid", pid)
+			slog.Info("Server process killed", "type", serverType, "pid", pid)
 		}
 	}
 
-	// Wait for goroutine to finish
-	if m.embeddingDone != nil {
-		<-m.embeddingDone
+	// Wait for the process to exit with a timeout
+	if instance.done != nil {
+		select {
+		case <-instance.done:
+			slog.Debug("Server process exited cleanly", "type", serverType)
+		case <-time.After(2 * time.Second):
+			slog.Warn("Timeout waiting for server process to exit", "type", serverType)
+		}
 	}
 
-	m.embeddingCmd = nil
-	m.embeddingCancel = nil
-	m.embeddingDone = nil
+	instance.cmd = nil
+	instance.cancel = nil
+	instance.done = nil
 
-	slog.Info("Embedding server stopped")
+	slog.Info("Server stopped", "type", serverType)
 	return nil
 }
 
-// Shutdown stops all running servers
 func (m *Manager) Shutdown() error {
 	var errs []error
 
@@ -333,19 +291,21 @@ func (m *Manager) Shutdown() error {
 	return nil
 }
 
-// waitForChatServer waits for the chat server to be ready by making a test completion request
 func (m *Manager) waitForChatServer(port int) error {
+	// This function is called from a goroutine in startServer, and the parent
+	// context cancellation is handled by the select statement there.
+	// We don't need to check context here since the goroutine will be abandoned
+	// when the select returns on context cancellation.
+
 	client := &http.Client{Timeout: 60 * time.Second}
 	completionURL := fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port)
 
 	slog.Info("Waiting for chat model to load and generate test response", "port", port)
 
-	startTime := time.Now()
-	for {
-		if time.Since(startTime) > serverStartTimeout {
-			return fmt.Errorf("chat server failed to start within %v", serverStartTimeout)
-		}
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
 
+	for {
 		testRequest := map[string]interface{}{
 			"model":      "local-model",
 			"messages":   []map[string]string{{"role": "user", "content": "hi"}},
@@ -361,7 +321,7 @@ func (m *Manager) waitForChatServer(port int) error {
 		req, err := http.NewRequest(http.MethodPost, completionURL, bytes.NewReader(body))
 		if err != nil {
 			slog.Debug("Failed to create request", "error", err)
-			time.Sleep(healthCheckInterval)
+			<-ticker.C
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -369,12 +329,17 @@ func (m *Manager) waitForChatServer(port int) error {
 		resp, err := client.Do(req)
 		if err != nil {
 			slog.Debug("Request failed, model still loading", "error", err)
-			time.Sleep(healthCheckInterval)
+			<-ticker.C
 			continue
 		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			slog.Debug("Failed to read response body", "error", err)
+			<-ticker.C
+			continue
+		}
 
 		if resp.StatusCode == http.StatusOK {
 			var response map[string]interface{}
@@ -395,27 +360,24 @@ func (m *Manager) waitForChatServer(port int) error {
 			slog.Debug("Model still loading", "port", port, "status", resp.StatusCode)
 		}
 
-		time.Sleep(healthCheckInterval)
+		<-ticker.C
 	}
 }
 
-// waitForEmbeddingServer waits for the embedding server to be ready by checking health endpoint
 func (m *Manager) waitForEmbeddingServer(port int) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 
 	slog.Info("Waiting for embedding model to load", "port", port)
 
-	startTime := time.Now()
-	for {
-		if time.Since(startTime) > serverStartTimeout {
-			return fmt.Errorf("embedding server failed to start within %v", serverStartTimeout)
-		}
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
 
+	for {
 		resp, err := client.Get(healthURL)
 		if err != nil {
 			slog.Debug("Health check failed, model still loading", "error", err)
-			time.Sleep(healthCheckInterval)
+			<-ticker.C
 			continue
 		}
 
@@ -427,20 +389,18 @@ func (m *Manager) waitForEmbeddingServer(port int) error {
 		}
 
 		slog.Debug("Model still loading", "port", port, "status", resp.StatusCode)
-		time.Sleep(healthCheckInterval)
+		<-ticker.C
 	}
 }
 
-// IsChatServerRunning returns true if the chat server is running
 func (m *Manager) IsChatServerRunning() bool {
-	m.chatMu.Lock()
-	defer m.chatMu.Unlock()
-	return m.chatCmd != nil
+	m.chat.mu.Lock()
+	defer m.chat.mu.Unlock()
+	return m.chat.cmd != nil
 }
 
-// IsEmbeddingServerRunning returns true if the embedding server is running
 func (m *Manager) IsEmbeddingServerRunning() bool {
-	m.embeddingMu.Lock()
-	defer m.embeddingMu.Unlock()
-	return m.embeddingCmd != nil
+	m.embedding.mu.Lock()
+	defer m.embedding.mu.Unlock()
+	return m.embedding.cmd != nil
 }

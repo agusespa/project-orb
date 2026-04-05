@@ -23,16 +23,8 @@ const (
 	defaultModelName      = "local-model"
 )
 
-//go:embed prompts/persona.md
-var defaultPersona string
-
 //go:embed prompts/instructions.md
 var embeddedInstructions string
-
-// LoadDefaultPersona returns the embedded default persona
-func LoadDefaultPersona() string {
-	return defaultPersona
-}
 
 var personaNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?name\s*:\s*([A-Za-z][A-Za-z0-9 _-]{0,40})\s*$`),
@@ -157,6 +149,7 @@ func EnsurePersonaFile() (string, error) {
 		return personaPath, nil
 	}
 
+	defaultPersona := "# Persona\n\nYou are calm, thoughtful, and supportive.\n"
 	if err := os.WriteFile(personaPath, []byte(defaultPersona), 0o644); err != nil {
 		return "", fmt.Errorf("create default persona at %s: %w", personaPath, err)
 	}

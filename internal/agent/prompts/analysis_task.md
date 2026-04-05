@@ -1,10 +1,10 @@
 Analyze the situation before responding.
 
 Identify:
+- what the user is really asking (surface request vs. underlying need)
+- emotional context or tension
+- relevant patterns from conversation history
+- what matters most in this moment
+- appropriate direction for this mode
 
-- what the user is really asking
-- possible emotional context
-- potential cognitive biases
-- useful coaching direction
-
-Return a short structured analysis. DO NOT draft a response to the user yet. ONLY output the internal analysis.
+Keep it brief and focused. DO NOT draft a response yet. ONLY output the internal analysis.

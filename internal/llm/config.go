@@ -103,18 +103,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("embedding_model is required")
 	}
 
-	// Check if models directory exists
 	if _, err := os.Stat(c.LlamaCpp.ModelsDir); err != nil {
 		return fmt.Errorf("models_dir does not exist: %s", c.LlamaCpp.ModelsDir)
 	}
 
-	// Check if chat model exists
 	chatModelPath := filepath.Join(c.LlamaCpp.ModelsDir, c.LlamaCpp.ChatModel)
 	if _, err := os.Stat(chatModelPath); err != nil {
 		return fmt.Errorf("chat_model not found: %s", chatModelPath)
 	}
 
-	// Check if embedding model exists
 	embeddingModelPath := filepath.Join(c.LlamaCpp.ModelsDir, c.LlamaCpp.EmbeddingModel)
 	if _, err := os.Stat(embeddingModelPath); err != nil {
 		return fmt.Errorf("embedding_model not found: %s", embeddingModelPath)

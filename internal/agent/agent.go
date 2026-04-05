@@ -8,25 +8,16 @@ import (
 )
 
 const (
-	maxRecentWords = 3000 // Recent history before compaction (optimized for performance/quality)
+	maxRecentWords = 3000 // Recent history before compaction
 	minRecentTurns = 3    // Always keep at least this many turns
 	maxTotalWords  = 6000 // Total context limit (recent + summary) for UI indicator
 )
-
-//go:embed prompts/summary_system.md
-var summarySystemPrompt string
 
 //go:embed prompts/analysis_task.md
 var analysisTaskPrompt string
 
 //go:embed prompts/summary_task.md
 var summaryTaskPrompt string
-
-//go:embed prompts/response_task.md
-var responseTaskPrompt string
-
-//go:embed prompts/welcome_task.md
-var welcomeTaskPrompt string
 
 type Turn struct {
 	User      string
@@ -66,7 +57,6 @@ func countWords(s string) int {
 	return len(strings.Fields(s))
 }
 
-// MaxTotalWords returns the maximum total word count for context
 func MaxTotalWords() int {
 	return maxTotalWords
 }
@@ -104,9 +94,7 @@ func updateConversationSummary(ctx context.Context, client *Client, existingSumm
 		return existingSummary, nil
 	}
 
-	messages := []chatMessage{
-		{Role: "system", Content: summarySystemPrompt},
-	}
+	var messages []chatMessage
 
 	if summary := strings.TrimSpace(existingSummary); summary != "" {
 		messages = append(messages, chatMessage{

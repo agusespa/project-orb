@@ -84,23 +84,6 @@ func (s *Service) GenerateAnalysis(ctx context.Context, userMessage string, sess
 	return strings.TrimSpace(analysis), nil
 }
 
-func (s *Service) GenerateWelcome(ctx context.Context, session SessionContext) (<-chan string, <-chan error, error) {
-	systemMessage, err := s.mode.SystemMessage()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	messages := buildConversationMessages(systemMessage, session)
-	messages = append(messages, chatMessage{Role: "user", Content: welcomeTaskPrompt})
-
-	tokenCh, errCh, err := s.client.StreamMessages(ctx, messages)
-	if err != nil {
-		return nil, nil, fmt.Errorf("generate welcome: %w", err)
-	}
-
-	return tokenCh, errCh, nil
-}
-
 func (s *Service) GenerateResponse(ctx context.Context, userMessage string, analysis string, session SessionContext) (<-chan string, <-chan error, error) {
 	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
@@ -111,7 +94,6 @@ func (s *Service) GenerateResponse(ctx context.Context, userMessage string, anal
 	messages = append(messages,
 		chatMessage{Role: "user", Content: buildResponseContext(analysis)},
 		chatMessage{Role: "user", Content: strings.TrimSpace(userMessage)},
-		chatMessage{Role: "user", Content: responseTaskPrompt},
 	)
 
 	tokenCh, errCh, err := s.client.StreamMessages(ctx, messages)
