@@ -26,11 +26,7 @@ const (
 //go:embed prompts/instructions.md
 var embeddedInstructions string
 
-var personaNamePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?name\s*:\s*([A-Za-z][A-Za-z0-9 _-]{0,40})\s*$`),
-	regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?your name is\s+([A-Za-z][A-Za-z0-9 _-]{0,40})[.!]?\s*$`),
-	regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?you are\s+([A-Za-z][A-Za-z0-9 _-]{0,40})[.!]?\s*$`),
-}
+var personaNamePattern = regexp.MustCompile(`(?m)^Your name is (.+)\.$`)
 
 type chatRequest struct {
 	Model    string        `json:"model"`
@@ -123,14 +119,10 @@ func LoadAgentName() (string, error) {
 }
 
 func ExtractAgentName(persona string) string {
-	trimmed := strings.TrimSpace(persona)
-	for _, pattern := range personaNamePatterns {
-		match := pattern.FindStringSubmatch(trimmed)
-		if len(match) > 1 {
-			return strings.TrimSpace(match[1])
-		}
+	match := personaNamePattern.FindStringSubmatch(persona)
+	if len(match) > 1 {
+		return strings.TrimSpace(match[1])
 	}
-
 	return ""
 }
 

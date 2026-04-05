@@ -222,33 +222,27 @@ func TestExtractAgentName(t *testing.T) {
 		want    string
 	}{
 		{
-			name: "name field",
-			persona: `Name: Sage
-You are a calm agent.`,
-			want: "Sage",
-		},
-		{
-			name: "markdown bullet name field",
-			persona: `- name: Coachy
-- tone: grounded`,
-			want: "Coachy",
-		},
-		{
-			name: "your name is",
-			persona: `Your name is Rowan.
+			name: "standard format with name",
+			persona: `# Persona
+
+Your name is Rowan.
+
 You are a practical agent.`,
 			want: "Rowan",
 		},
 		{
-			name: "you are named entity",
-			persona: `You are Solace.
-Help me think clearly.`,
-			want: "Solace",
+			name: "standard format without name",
+			persona: `# Persona
+
+You are calm, thoughtful, and supportive.`,
+			want: "",
 		},
 		{
-			name:    "generic persona has no explicit name",
-			persona: `You are a calm, practical AI life coach.`,
-			want:    "",
+			name: "name with special characters",
+			persona: `Your name is Mary-Jane O'Brien.
+
+You are helpful.`,
+			want: "Mary-Jane O'Brien",
 		},
 	}
 
