@@ -19,17 +19,12 @@ type streamErrMsg struct {
 
 type spinnerTickMsg struct{}
 
-type streamDoneMsg struct {
-	session  agent.SessionContext
-	canceled bool
-}
-
 type tokenChannelClosedMsg struct{}
 type errChannelClosedMsg struct{}
 type doneChannelClosedMsg struct{}
 
 type ModelDependencies struct {
-	RunnerFactory RunnerFactory
+	Client        *agent.Client
 	CurrentMode   agent.Mode
 	AgentName     string
 	PersonaPath   string
@@ -44,8 +39,8 @@ type streamState struct {
 	cancelCurrent        context.CancelFunc
 	tokenCh              <-chan string
 	errCh                <-chan error
-	doneCh               <-chan StreamResult
-	runner               StreamRunner
+	doneCh               <-chan agent.StreamResult
+	runner               *AgentRunner
 }
 
 type modeSelector struct {
@@ -66,11 +61,11 @@ type Model struct {
 
 	stream streamState
 
-	session       agent.SessionContext
-	currentMode   agent.Mode
-	agentName     string
-	personaPath   string
-	runnerFactory RunnerFactory
+	session     agent.SessionContext
+	currentMode agent.Mode
+	agentName   string
+	personaPath string
+	client      *agent.Client
 
 	shutdownCtx context.Context
 	err         error
@@ -93,7 +88,7 @@ func NewModel(deps ModelDependencies) Model {
 	return Model{
 		statusMessage: deps.StatusMessage,
 		currentMode:   deps.CurrentMode,
-		runnerFactory: deps.RunnerFactory,
+		client:        deps.Client,
 		agentName:     deps.AgentName,
 		personaPath:   deps.PersonaPath,
 		styles:        NewStyles(deps.CurrentMode.ID),
@@ -124,7 +119,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForToken(m.stream.tokenCh)
 	case streamErrMsg:
 		return m.handleStreamError(msg.err)
-	case streamDoneMsg:
+	case agent.StreamResult:
 		return m.handleStreamDone(msg)
 	case tokenChannelClosedMsg, errChannelClosedMsg, doneChannelClosedMsg:
 		return m, nil
@@ -267,21 +262,21 @@ func (m Model) startPrompt() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmd, spinnerTick())
 }
 
-func (m Model) ensureRunner() (StreamRunner, error) {
+func (m Model) ensureRunner() (*AgentRunner, error) {
 	if m.stream.runner != nil {
 		return m.stream.runner, nil
 	}
 
-	if m.runnerFactory == nil {
-		return nil, ErrRunnerNotConfigured
+	if m.client == nil {
+		return nil, agent.ErrRunnerNotConfigured
 	}
 
-	runner, err := m.runnerFactory(m.currentMode)
+	service, err := agent.NewService(m.client, m.currentMode)
 	if err != nil {
 		return nil, err
 	}
 
-	m.stream.runner = runner
+	m.stream.runner = &AgentRunner{Service: service}
 	return m.stream.runner, nil
 }
 
@@ -336,24 +331,25 @@ func (m Model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.runnerFactory == nil {
-		m.err = ErrRunnerNotConfigured
+	if m.client == nil {
+		m.err = agent.ErrRunnerNotConfigured
 		m.statusMessage = ""
 		return m, nil
 	}
 
-	runner, err := m.runnerFactory(mode)
+	service, err := agent.NewService(m.client, mode)
 	if err != nil {
 		m.err = err
 		m.statusMessage = ""
 		return m, nil
 	}
 
+	runner := &AgentRunner{Service: service}
 	m.switchToMode(mode, runner)
 	return m, nil
 }
 
-func (m *Model) switchToMode(mode agent.Mode, runner StreamRunner) {
+func (m *Model) switchToMode(mode agent.Mode, runner *AgentRunner) {
 	if m.stream.active && m.stream.cancelCurrent != nil {
 		m.stream.cancelCurrent()
 		m.stream.cancelCurrent = nil
@@ -426,17 +422,17 @@ func (m Model) isModeCommandInput() bool {
 	return strings.HasPrefix(trimmed, "/mode") || strings.HasPrefix(trimmed, "/modes")
 }
 
-func (m Model) handleStreamDone(msg streamDoneMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleStreamDone(msg agent.StreamResult) (tea.Model, tea.Cmd) {
 	m.stream.active = false
 	m.stream.waitingForFirstToken = false
 	m.stream.cancelCurrent = nil
-	m.stream.completed = !msg.canceled
-	m.session = msg.session
+	m.stream.completed = !msg.Canceled
+	m.session = msg.Session
 	m.err = nil
 
 	hasOutput := strings.TrimSpace(m.output) != ""
 
-	if msg.canceled && !hasOutput && m.pendingPrompt != "" {
+	if msg.Canceled && !hasOutput && m.pendingPrompt != "" {
 		m.input = m.pendingPrompt
 	} else if hasOutput {
 		m.session.AddTurn(agent.Turn{

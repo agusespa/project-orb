@@ -83,22 +83,11 @@ func initialModel(setupResult *setup.Result) (ui.Model, error) {
 	}
 
 	return ui.NewModel(ui.ModelDependencies{
-		RunnerFactory: newRunnerFactory(client),
-		CurrentMode:   mode,
-		AgentName:     agentName,
-		PersonaPath:   personaPath,
+		Client:      client,
+		CurrentMode: mode,
+		AgentName:   agentName,
+		PersonaPath: personaPath,
 	}), nil
-}
-
-func newRunnerFactory(client *agent.Client) ui.RunnerFactory {
-	return func(mode agent.Mode) (ui.StreamRunner, error) {
-		service, err := agent.NewService(client, mode)
-		if err != nil {
-			return nil, err
-		}
-
-		return ui.AgentRunner{Service: service}, nil
-	}
 }
 
 func setupLogging() error {
