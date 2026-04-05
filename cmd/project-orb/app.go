@@ -12,23 +12,43 @@ func newProgram(m model, ctx context.Context) *tea.Program {
 	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 }
 
-func initialModel() model {
-	// globalSelectedMode is guaranteed to be valid from the setup wizard
-	mode, _ := agent.FindMode(globalSelectedMode)
+func initialModel(setupResult *SetupResult) model {
+	mode, _ := agent.FindMode(setupResult.SelectedMode)
 
 	personaPath, err := agent.EnsurePersonaFile()
+	if err != nil {
+		return newModel(modelDependencies{
+			runnerFactory: nil,
+			currentMode:   mode,
+			agentName:     "Agent",
+			personaPath:   "",
+			err:           err,
+		})
+	}
 
-	agentName, nameErr := agent.LoadAgentName()
-	if nameErr != nil && err == nil {
-		err = nameErr
+	agentName, err := agent.LoadAgentName()
+	if err != nil {
+		return newModel(modelDependencies{
+			runnerFactory: nil,
+			currentMode:   mode,
+			agentName:     "Agent",
+			personaPath:   personaPath,
+			err:           err,
+		})
 	}
 	if agentName == "" {
 		agentName = "Agent"
 	}
 
-	client, clientErr := agent.NewClient(agent.DefaultClientConfig())
-	if clientErr != nil && err == nil {
-		err = clientErr
+	client, err := agent.NewClient(agent.DefaultClientConfig())
+	if err != nil {
+		return newModel(modelDependencies{
+			runnerFactory: nil,
+			currentMode:   mode,
+			agentName:     agentName,
+			personaPath:   personaPath,
+			err:           err,
+		})
 	}
 
 	return newModel(modelDependencies{
@@ -36,7 +56,7 @@ func initialModel() model {
 		currentMode:   mode,
 		agentName:     agentName,
 		personaPath:   personaPath,
-		err:           err,
+		err:           nil,
 	})
 }
 

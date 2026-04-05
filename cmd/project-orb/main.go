@@ -6,13 +6,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
-	f, err := os.OpenFile("debug.log", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	logPath, err := getLogPath()
+	if err != nil {
+		fmt.Println("fatal:", err)
+		os.Exit(1)
+	}
+
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		fmt.Println("fatal:", err)
 		os.Exit(1)
@@ -27,51 +35,84 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup signal handling
+	// Always run setup wizard to confirm config and select mode
+	slog.Info("Starting setup wizard...")
+	sm := newSetupModel(ctx)
+	p := tea.NewProgram(sm, tea.WithAltScreen(), tea.WithContext(ctx))
+	finalModel, err := p.Run()
+	if err != nil {
+		fmt.Printf("Setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Extract result from final model
+	var setupResult *SetupResult
+	if model, ok := finalModel.(setupModel); ok && model.result != nil {
+		setupResult = model.result
+	}
+
+	// Check if setup completed successfully
+	if setupResult == nil || setupResult.Manager == nil || setupResult.SelectedMode == "" {
+		fmt.Println("Setup was not completed. Exiting.")
+		if setupResult != nil && setupResult.Manager != nil {
+			_ = setupResult.Manager.Shutdown()
+		}
+		os.Exit(1)
+	}
+
+	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
 		slog.Info("Shutdown signal received, cleaning up...")
-		if globalManager != nil {
-			_ = globalManager.Shutdown()
+		if setupResult.Manager != nil {
+			_ = setupResult.Manager.Shutdown()
 		}
 		cancel()
 	}()
 
-	// Always run setup wizard to confirm config and select mode
-	slog.Info("Starting setup wizard...")
-	setupModel := newSetupModel(ctx)
-	p := tea.NewProgram(setupModel, tea.WithAltScreen(), tea.WithContext(ctx))
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Setup failed: %v\n", err)
-		os.Exit(1)
-	}
+	slog.Info("Starting agent...", "mode", setupResult.SelectedMode)
 
-	// Check if setup completed successfully
-	if globalManager == nil || globalSelectedMode == "" {
-		fmt.Println("Setup was not completed. Exiting.")
-		if globalManager != nil {
-			_ = globalManager.Shutdown()
-		}
-		os.Exit(1)
-	}
-
-	slog.Info("Starting agent...", "mode", globalSelectedMode)
-
-	p = newProgram(initialModel(), ctx)
+	p = newProgram(initialModel(setupResult), ctx)
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("failed to start UI: %v\n", err)
 	}
 
 	slog.Info("Application stopped, shutting down servers...")
-	if globalManager != nil {
-		if err := globalManager.Shutdown(); err != nil {
+	if setupResult.Manager != nil {
+		if err := setupResult.Manager.Shutdown(); err != nil {
 			slog.Error("Failed to shutdown servers", "error", err)
 		}
 	}
 	slog.Info("Shutdown complete")
 }
 
-var globalSelectedMode string
+func getLogPath() (string, error) {
+	logDir, err := resolveAppDataDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve log directory: %w", err)
+	}
+
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return "", fmt.Errorf("create log directory %s: %w", logDir, err)
+	}
+
+	return filepath.Join(logDir, "debug.log"), nil
+}
+
+func resolveAppDataDir() (string, error) {
+	const appName = "project-orb"
+
+	if xdgDataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdgDataHome != "" {
+		return filepath.Join(xdgDataHome, appName), nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+
+	return filepath.Join(homeDir, ".local", "share", appName), nil
+}

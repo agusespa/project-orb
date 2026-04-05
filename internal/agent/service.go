@@ -64,14 +64,7 @@ func (s *Service) PrepareSession(ctx context.Context, session *SessionContext) e
 	return nil
 }
 
-func (s *Service) GenerateAnalysis(userMessage string, session SessionContext) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
-
-	return s.GenerateAnalysisWithContext(ctx, userMessage, session)
-}
-
-func (s *Service) GenerateAnalysisWithContext(ctx context.Context, userMessage string, session SessionContext) (string, error) {
+func (s *Service) GenerateAnalysis(ctx context.Context, userMessage string, session SessionContext) (string, error) {
 	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
 		return "", err
@@ -91,7 +84,7 @@ func (s *Service) GenerateAnalysisWithContext(ctx context.Context, userMessage s
 	return strings.TrimSpace(analysis), nil
 }
 
-func (s *Service) GenerateWelcomeWithContext(ctx context.Context, session SessionContext) (<-chan string, <-chan error, error) {
+func (s *Service) GenerateWelcome(ctx context.Context, session SessionContext) (<-chan string, <-chan error, error) {
 	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
 		return nil, nil, err
@@ -108,7 +101,7 @@ func (s *Service) GenerateWelcomeWithContext(ctx context.Context, session Sessio
 	return tokenCh, errCh, nil
 }
 
-func (s *Service) GenerateResponseWithContext(ctx context.Context, userMessage string, analysis string, session SessionContext) (<-chan string, <-chan error, error) {
+func (s *Service) GenerateResponse(ctx context.Context, userMessage string, analysis string, session SessionContext) (<-chan string, <-chan error, error) {
 	systemMessage, err := s.mode.SystemMessage()
 	if err != nil {
 		return nil, nil, err

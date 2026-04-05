@@ -393,6 +393,12 @@ func (m model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) switchToMode(mode agent.Mode, runner streamRunner) {
+	// Cancel any ongoing stream before switching
+	if m.streaming && m.cancelCurrent != nil {
+		m.cancelCurrent()
+		m.cancelCurrent = nil
+	}
+
 	m.input = ""
 	m.modeSelectorActive = false
 	m.modeSelectorIndex = 0
@@ -401,10 +407,11 @@ func (m *model) switchToMode(mode agent.Mode, runner streamRunner) {
 	m.session = agent.SessionContext{}
 	m.pendingPrompt = ""
 	m.output = ""
+	m.streaming = false
+	m.waitingForFirstToken = false
 	m.tokenCh = nil
 	m.errCh = nil
 	m.doneCh = nil
-	m.cancelCurrent = nil
 	m.statusMessage = fmt.Sprintf("Switched to %s mode. Started a fresh conversation.", mode.Name)
 
 	m.applyStyles(ui.NewStyles(mode.ID))

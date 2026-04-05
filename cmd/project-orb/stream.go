@@ -83,7 +83,7 @@ func waitForStreamResult(ch <-chan streamResult) tea.Cmd {
 
 func startStreaming(prompt string, session agent.SessionContext, service *agent.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	tokenCh := make(chan string)
+	tokenCh := make(chan string, 10) // Buffered to prevent blocking on cancel
 	errCh := make(chan error, 1)
 	doneCh := make(chan streamResult, 1)
 
@@ -109,7 +109,7 @@ func startStreaming(prompt string, session agent.SessionContext, service *agent.
 
 		slog.Info("Starting generation pipeline", "prompt", prompt, "source", "User")
 
-		analysis, err := service.GenerateAnalysisWithContext(ctx, prompt, session)
+		analysis, err := service.GenerateAnalysis(ctx, prompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				doneCh <- streamResult{session: session, canceled: true}
@@ -121,7 +121,7 @@ func startStreaming(prompt string, session agent.SessionContext, service *agent.
 
 		slog.Debug("Thinking stage", "prompt", prompt, "analysis", analysis)
 
-		responseCh, responseErrCh, err := service.GenerateResponseWithContext(ctx, prompt, analysis, session)
+		responseCh, responseErrCh, err := service.GenerateResponse(ctx, prompt, analysis, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				doneCh <- streamResult{session: session, canceled: true}
@@ -134,6 +134,11 @@ func startStreaming(prompt string, session agent.SessionContext, service *agent.
 		for responseCh != nil || responseErrCh != nil {
 			select {
 			case <-ctx.Done():
+				// Drain remaining tokens to prevent goroutine leak
+				if responseCh != nil {
+					for range responseCh {
+					}
+				}
 				doneCh <- streamResult{session: session, canceled: true}
 				return
 			case token, ok := <-responseCh:
@@ -165,7 +170,7 @@ func startStreaming(prompt string, session agent.SessionContext, service *agent.
 
 func startWelcomeStreaming(session agent.SessionContext, service *agent.Service) (tea.Cmd, <-chan string, <-chan error, <-chan streamResult, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	tokenCh := make(chan string)
+	tokenCh := make(chan string, 10) // Buffered to prevent blocking on cancel
 	errCh := make(chan error, 1)
 	doneCh := make(chan streamResult, 1)
 
@@ -182,7 +187,7 @@ func startWelcomeStreaming(session agent.SessionContext, service *agent.Service)
 
 		slog.Info("Generating welcome message...", "source", "System")
 
-		responseCh, responseErrCh, err := service.GenerateWelcomeWithContext(ctx, session)
+		responseCh, responseErrCh, err := service.GenerateWelcome(ctx, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				doneCh <- streamResult{session: session, canceled: true}
@@ -195,6 +200,11 @@ func startWelcomeStreaming(session agent.SessionContext, service *agent.Service)
 		for responseCh != nil || responseErrCh != nil {
 			select {
 			case <-ctx.Done():
+				// Drain remaining tokens to prevent goroutine leak
+				if responseCh != nil {
+					for range responseCh {
+					}
+				}
 				doneCh <- streamResult{session: session, canceled: true}
 				return
 			case token, ok := <-responseCh:

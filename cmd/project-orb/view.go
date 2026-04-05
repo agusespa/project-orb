@@ -22,6 +22,12 @@ const (
 	contextGreenThreshold  = 60.0
 	contextYellowThreshold = 75.0
 	contextOrangeThreshold = 85.0
+
+	// Thinking animation colors
+	thinkingColorBright  = "255"
+	thinkingColorMedium  = "252"
+	thinkingColorDim     = "250"
+	thinkingColorSubdued = "245"
 )
 
 func (m model) View() string {
@@ -43,7 +49,7 @@ func (m model) View() string {
 	chatPane := lipgloss.NewStyle().
 		Width(m.width).
 		Height(chatHeight).
-		Padding(0, 1).
+		Padding(0, 1, 2, 1).
 		Render(m.renderChatContent(contentWidth, chatHeight))
 
 	inputPane := m.inputBox.
@@ -248,13 +254,13 @@ func (m model) renderThinkingSweep(frame int) string {
 		var color lipgloss.Color
 		switch distance {
 		case 0:
-			color = lipgloss.Color("255")
+			color = lipgloss.Color(thinkingColorBright)
 		case 1:
-			color = lipgloss.Color("252")
+			color = lipgloss.Color(thinkingColorMedium)
 		case 2:
-			color = lipgloss.Color("250")
+			color = lipgloss.Color(thinkingColorDim)
 		default:
-			color = lipgloss.Color("245")
+			color = lipgloss.Color(thinkingColorSubdued)
 		}
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
 	}

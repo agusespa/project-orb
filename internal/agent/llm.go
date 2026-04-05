@@ -103,15 +103,6 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}, nil
 }
 
-func LoadSystemMessage() (string, error) {
-	persona, err := LoadPersona()
-	if err != nil {
-		return "", err
-	}
-
-	return persona + "\n\n---\n\n" + embeddedInstructions, nil
-}
-
 func LoadPersona() (string, error) {
 	personaPath, err := EnsurePersonaFile()
 	if err != nil {

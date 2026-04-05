@@ -5,11 +5,9 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
-	"time"
 )
 
 const (
-	requestTimeout = 10 * time.Minute
 	maxRecentWords = 3000 // Recent history before compaction (optimized for performance/quality)
 	minRecentTurns = 3    // Always keep at least this many turns
 	maxTotalWords  = 6000 // Total context limit (recent + summary) for UI indicator

@@ -76,17 +76,9 @@ func TestSessionContextWordCount(t *testing.T) {
 
 func TestServicePrepareSessionMultipleCompactions(t *testing.T) {
 	compactionCount := 0
-	var summaries []string
 	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		compactionCount++
-		// Simulate summary growing with each compaction
-		newSummary := existingSummary
-		if newSummary != "" {
-			newSummary += " | "
-		}
-		newSummary += fmt.Sprintf("compaction_%d", compactionCount)
-		summaries = append(summaries, newSummary)
-		return newSummary, nil
+		return fmt.Sprintf("summary_after_compaction_%d", compactionCount), nil
 	})
 
 	// Start with empty session
@@ -112,21 +104,15 @@ func TestServicePrepareSessionMultipleCompactions(t *testing.T) {
 		t.Fatalf("expected 3 compactions, got %d", compactionCount)
 	}
 
-	// Verify summary keeps growing
-	if !strings.Contains(session.Summary, "compaction_1") {
-		t.Fatal("expected summary to contain first compaction")
-	}
-	if !strings.Contains(session.Summary, "compaction_2") {
-		t.Fatal("expected summary to contain second compaction")
-	}
-	if !strings.Contains(session.Summary, "compaction_3") {
-		t.Fatal("expected summary to contain third compaction")
+	// Verify summary was updated on last compaction
+	if session.Summary != "summary_after_compaction_3" {
+		t.Fatalf("expected summary to be from last compaction, got %q", session.Summary)
 	}
 
-	// This demonstrates the issue: summary grows unbounded
-	summaryWordCount := countWords(session.Summary)
-	t.Logf("Summary word count after 3 compactions: %d", summaryWordCount)
-	t.Logf("Final summary: %s", session.Summary)
+	// Verify recent turns are within limit
+	if session.WordCount() > maxRecentWords {
+		t.Fatalf("expected word count under %d after compaction, got %d", maxRecentWords, session.WordCount())
+	}
 }
 
 func TestServicePrepareSessionWithinLimit(t *testing.T) {

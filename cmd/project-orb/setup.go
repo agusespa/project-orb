@@ -18,6 +18,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	loadingAnimationInterval = 120 * time.Millisecond
+	loadingDotsFrames        = 4
+	loadingDotsDivisor       = 3
+)
+
 type setupState int
 
 const (
@@ -26,13 +32,16 @@ const (
 	setupStateInstalling
 	setupStateWaitUpgradeConfirm
 	setupStateUpgrading
-	setupStateCheckConfig
-	setupStateWaitConfigConfirm
 	setupStateWaitModelsDir
 	setupStateWaitChatModel
 	setupStateWaitEmbeddingModel
 	setupStateSaving
 	setupStateStartingServer
+	setupStateWaitPersonaCustomize
+	setupStateWaitPersonaName
+	setupStateWaitPersonaTone
+	setupStateWaitPersonaGoals
+	setupStateSavingPersona
 	setupStateWaitModeSelection
 	setupStateDone
 	setupStateError
@@ -59,11 +68,20 @@ type setupModel struct {
 	embeddingModel  string
 	selectedMode    string
 
+	// Persona customization state
+	personaPath  string
+	personaName  string
+	personaTone  string
+	personaGoals string
+
 	// Loading animation
 	loadingFrame int
 
 	// Context
 	ctx context.Context
+
+	// Result
+	result *SetupResult
 }
 
 type setupMessage struct {
@@ -100,12 +118,17 @@ type setupSaveConfigDoneMsg struct {
 }
 
 type setupServerStartDoneMsg struct {
-	err error
+	manager *llm.Manager
+	err     error
 }
 
 type setupPersonaCheckDoneMsg struct {
 	isDefault   bool
 	personaPath string
+}
+
+type setupPersonaSaveDoneMsg struct {
+	err error
 }
 
 type setupLoadingTickMsg struct{}
@@ -155,6 +178,9 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupPersonaCheckDoneMsg:
 		return m.handlePersonaCheckDone(msg)
 
+	case setupPersonaSaveDoneMsg:
+		return m.handlePersonaSaveDone(msg)
+
 	case setupLoadingTickMsg:
 		if m.state == setupStateStartingServer {
 			m.loadingFrame = (m.loadingFrame + 1) % 12
@@ -197,11 +223,20 @@ func (m setupModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m setupModel) handleEnter() (tea.Model, tea.Cmd) {
 	userInput := strings.TrimSpace(m.input)
-	if userInput == "" {
+
+	// Allow empty input for persona customization states (to skip)
+	allowEmpty := m.state == setupStateWaitPersonaName ||
+		m.state == setupStateWaitPersonaTone ||
+		m.state == setupStateWaitPersonaGoals
+
+	if userInput == "" && !allowEmpty {
 		return m, nil
 	}
 
-	m.conversation = append(m.conversation, setupMessage{speaker: "user", text: userInput})
+	// Only add to conversation if there's actual input
+	if userInput != "" {
+		m.conversation = append(m.conversation, setupMessage{speaker: "user", text: userInput})
+	}
 	m.input = ""
 
 	switch m.state {
@@ -210,9 +245,6 @@ func (m setupModel) handleEnter() (tea.Model, tea.Cmd) {
 
 	case setupStateWaitUpgradeConfirm:
 		return m.handleUpgradeConfirm(userInput)
-
-	case setupStateWaitConfigConfirm:
-		return m.handleConfigConfirm(userInput)
 
 	case setupStateWaitModelsDir:
 		return m.handleModelsDir(userInput)
@@ -225,6 +257,18 @@ func (m setupModel) handleEnter() (tea.Model, tea.Cmd) {
 
 	case setupStateWaitModeSelection:
 		return m.handleModeSelection(userInput)
+
+	case setupStateWaitPersonaCustomize:
+		return m.handlePersonaCustomizeConfirm(userInput)
+
+	case setupStateWaitPersonaName:
+		return m.handlePersonaNameInput(userInput)
+
+	case setupStateWaitPersonaTone:
+		return m.handlePersonaToneInput(userInput)
+
+	case setupStateWaitPersonaGoals:
+		return m.handlePersonaGoalsInput(userInput)
 	}
 
 	return m, nil
@@ -274,6 +318,11 @@ func (m setupModel) handleInstallCheckDone(msg setupInstallCheckDoneMsg) (tea.Mo
 }
 
 func (m setupModel) handleInstallConfirm(input string) (tea.Model, tea.Cmd) {
+	if !isYesOrNo(input) {
+		m.addWizardMessage("Please answer yes or no.\n\nWould you like me to install llama-server? (yes/no)")
+		return m, nil
+	}
+
 	if !isYes(input) {
 		m.addWizardMessage("I understand. Unfortunately, llama-server is required to run this application. Please install it manually and try again.")
 		m.state = setupStateError
@@ -304,6 +353,11 @@ func (m setupModel) handleInstallDone(msg setupInstallDoneMsg) (tea.Model, tea.C
 }
 
 func (m setupModel) handleUpgradeConfirm(input string) (tea.Model, tea.Cmd) {
+	if !isYesOrNo(input) {
+		m.addWizardMessage("Please answer yes or no.\n\nWould you like to update llama.cpp? (yes/no)")
+		return m, nil
+	}
+
 	if !isYes(input) {
 		m.addWizardMessage("No problem, we'll continue with the current version.")
 		return m, m.loadConfig()
@@ -342,58 +396,35 @@ func (m setupModel) loadConfig() tea.Cmd {
 
 func (m setupModel) handleConfigLoaded(msg setupConfigLoadedMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil && msg.config != nil {
-		// Config exists and is valid
+		// Config exists and is valid - start server immediately
 		m.existingConfig = msg.config
 		m.conversation = append(m.conversation, setupMessage{
 			speaker: "wizard",
 			text: fmt.Sprintf(
-				"Hello! I'm your setup wizard.\n\nI'll help you get everything configured to start using the application.\n\n"+
-					"I found your existing configuration:\n\n"+
-					"  Models directory: %s\n"+
-					"  Chat model: %s\n"+
-					"  Embedding model: %s\n\n"+
-					"Is this correct? (yes/no)",
+				"Hello! I'm your setup wizard.\n\n"+
+					"Found your configuration:\n"+
+					"  Models: %s\n"+
+					"  Chat: %s\n"+
+					"  Embedding: %s\n\n"+
+					"Starting the chat server... This may take a moment while the model loads.",
 				msg.config.LlamaCpp.ModelsDir,
 				msg.config.LlamaCpp.ChatModel,
 				msg.config.LlamaCpp.EmbeddingModel,
 			),
 		})
-		m.state = setupStateWaitConfigConfirm
-		return m, nil
-	}
-
-	// No config or invalid, start setup wizard
-	// Preload home directory in input
-	homeDir, _ := os.UserHomeDir()
-	m.input = homeDir
-
-	m.conversation = append(m.conversation, setupMessage{
-		speaker: "wizard",
-		text:    "Hello! I'm your setup wizard.\n\nI'll help you get everything configured to start using the application.\n\nNow let's configure your models.\n\nWhere do you keep your .gguf model files?\n(Enter the full path, e.g., /Users/username/models)",
-	})
-	m.state = setupStateWaitModelsDir
-	return m, nil
-}
-
-func (m setupModel) handleConfigConfirm(input string) (tea.Model, tea.Cmd) {
-	if isYes(input) {
-		m.conversation = append(m.conversation, setupMessage{
-			speaker: "wizard",
-			text:    "Perfect! Starting the chat server... This may take a moment while the model loads.",
-		})
 		m.state = setupStateStartingServer
 		m.loadingFrame = 0
 		return m, tea.Batch(
 			m.startServer(m.existingConfig),
-			m.checkPersona(),
 			loadingTick(),
 		)
 	}
 
-	m.addWizardMessage("No problem, let's reconfigure.\n\nWhere do you keep your .gguf model files?\n(Enter the full path, e.g., /Users/username/models)")
-	// Preload home directory in input
-	homeDir, _ := os.UserHomeDir()
-	m.input = homeDir
+	// No config or invalid, start setup wizard
+	m.conversation = append(m.conversation, setupMessage{
+		speaker: "wizard",
+		text:    "Hello! I'm your setup wizard.\n\nI'll help you get everything configured to start using the application.\n\nNow let's configure your models.\n\nWhere do you keep your .gguf model files?\n(Enter the full path, e.g., /Users/username/models)",
+	})
 	m.state = setupStateWaitModelsDir
 	return m, nil
 }
@@ -473,6 +504,12 @@ func (m setupModel) handleModelsScanDone(msg setupModelsScanDoneMsg) (tea.Model,
 }
 
 func (m setupModel) handleChatModelSelection(input string) (tea.Model, tea.Cmd) {
+	if len(m.availableModels) == 0 {
+		m.addWizardMessage("No models available. Please go back and select a valid models directory.")
+		m.state = setupStateError
+		return m, nil
+	}
+
 	selection, err := strconv.Atoi(input)
 	if err != nil || selection < 1 || selection > len(m.availableModels) {
 		m.addWizardMessage(fmt.Sprintf("Invalid selection. Please enter a number between 1 and %d:", len(m.availableModels)))
@@ -486,6 +523,12 @@ func (m setupModel) handleChatModelSelection(input string) (tea.Model, tea.Cmd) 
 }
 
 func (m setupModel) handleEmbeddingModelSelection(input string) (tea.Model, tea.Cmd) {
+	if len(m.availableModels) == 0 {
+		m.addWizardMessage("No models available. Please go back and select a valid models directory.")
+		m.state = setupStateError
+		return m, nil
+	}
+
 	selection, err := strconv.Atoi(input)
 	if err != nil || selection < 1 || selection > len(m.availableModels) {
 		m.addWizardMessage(fmt.Sprintf("Invalid selection. Please enter a number between 1 and %d:", len(m.availableModels)))
@@ -493,9 +536,10 @@ func (m setupModel) handleEmbeddingModelSelection(input string) (tea.Model, tea.
 	}
 
 	m.embeddingModel = m.availableModels[selection-1]
-	m.addWizardMessage(fmt.Sprintf("Perfect! Using %s for embeddings.\n\nSaving configuration...", m.embeddingModel))
-	m.state = setupStateSaving
-	return m, m.saveConfig()
+	m.addWizardMessage(fmt.Sprintf("Perfect! Using %s for embeddings.", m.embeddingModel))
+
+	// Check persona before saving config
+	return m, m.checkPersona()
 }
 
 func (m setupModel) saveConfig() tea.Cmd {
@@ -529,21 +573,19 @@ func (m setupModel) handleSaveConfigDone(msg setupSaveConfigDoneMsg) (tea.Model,
 	m.state = setupStateStartingServer
 	m.loadingFrame = 0
 
-	slog.Info("Starting server and persona check")
+	slog.Info("Starting server")
 
-	// Start server in background and check persona in parallel
+	// Reload config from disk to ensure consistency
+	config, err := llm.LoadConfig()
+	if err != nil {
+		m.addWizardMessage(fmt.Sprintf("Failed to load saved configuration: %v", err))
+		m.state = setupStateError
+		return m, nil
+	}
+
+	// Start server
 	return m, tea.Batch(
-		func() tea.Msg {
-			slog.Info("Server start goroutine started")
-			config, err := llm.LoadConfig()
-			if err != nil {
-				return setupServerStartDoneMsg{err: err}
-			}
-			err = startChatServer(m.ctx, config)
-			slog.Info("Server start completed", "error", err)
-			return setupServerStartDoneMsg{err: err}
-		},
-		m.checkPersona(),
+		m.startServer(config),
 		loadingTick(),
 	)
 }
@@ -570,23 +612,33 @@ func (m setupModel) checkPersona() tea.Cmd {
 }
 
 func (m setupModel) handlePersonaCheckDone(msg setupPersonaCheckDoneMsg) (tea.Model, tea.Cmd) {
-	// Only show message if persona is still default
+	m.personaPath = msg.personaPath
+
+	// Only offer customization if persona is still default (first-time setup)
 	if msg.isDefault && msg.personaPath != "" {
-		m.addWizardMessage(fmt.Sprintf(
-			"I noticed you're using the default persona. You can customize it to make the agent more personal!\n\n"+
-				"Edit this file: %s\n\n"+
-				"Add details about yourself, your goals, preferences, and anything else you'd like the agent to know.",
-			msg.personaPath,
-		))
+		m.conversation = append(m.conversation, setupMessage{
+			speaker: "wizard",
+			text: "One more thing! Would you like to personalize your agent?\n\n" +
+				"You can give it a name, set its tone, and share context about what you're working on.\n" +
+				"This helps the agent understand you better.\n\n" +
+				"Customize now? (yes/no, or press Enter to skip)",
+		})
+		m.state = setupStateWaitPersonaCustomize
+		return m, nil
 	}
 
-	// Don't change state, just wait for server to finish
-	return m, nil
+	// Persona already customized or not available - proceed to save config
+	m.addWizardMessage("Saving configuration...")
+	m.state = setupStateSaving
+	return m, m.saveConfig()
 }
 
 func (m setupModel) startServer(config *llm.Config) tea.Cmd {
 	return func() tea.Msg {
-		return setupServerStartDoneMsg{err: startChatServer(m.ctx, config)}
+		slog.Info("Starting chat server")
+		manager, err := startChatServer(m.ctx, config)
+		slog.Info("Server start completed", "error", err)
+		return setupServerStartDoneMsg{manager: manager, err: err}
 	}
 }
 
@@ -597,15 +649,15 @@ func (m setupModel) handleServerStartDone(msg setupServerStartDoneMsg) (tea.Mode
 		return m, nil
 	}
 
-	// Server is ready, show what the LLM responded with for debugging
-	debugMsg := "Server ready! ✓"
-	if globalServerResponse != "" {
-		debugMsg += fmt.Sprintf("\n\nDebug - LLM test response: %s", globalServerResponse)
+	// Store manager in result
+	if m.result == nil {
+		m.result = &SetupResult{}
 	}
+	m.result.Manager = msg.manager
 
 	m.conversation = append(m.conversation, setupMessage{
 		speaker: "wizard",
-		text:    debugMsg + "\n\nWhich mode would you like to start with?\n\n1. Coach - Guidance for everyday reflection, decisions, and next steps\n2. Performance Review - Structured feedback on effectiveness, habits and growth areas\n3. Analyst - Deeper psychoanalytic questioning to examine motives and patterns\n\nEnter 1, 2, or 3:",
+		text:    "Server ready! ✓\n\nWhich mode would you like to start with?\n\n1. Coach - Guidance for everyday reflection, decisions, and next steps\n2. Performance Review - Structured feedback on effectiveness, habits and growth areas\n3. Analyst - Deeper psychoanalytic questioning to examine motives and patterns\n\nEnter 1, 2, or 3:",
 	})
 	m.state = setupStateWaitModeSelection
 	return m, nil
@@ -624,15 +676,130 @@ func (m setupModel) handleModeSelection(input string) (tea.Model, tea.Cmd) {
 
 	modes := []string{"coach", "performance-review", "analyst"}
 	m.selectedMode = modes[selection-1]
-	globalSelectedMode = m.selectedMode
+
+	if m.result == nil {
+		m.result = &SetupResult{}
+	}
+	m.result.SelectedMode = m.selectedMode
 
 	m.state = setupStateDone
 
 	return m, tea.Quit
 }
 
+func (m setupModel) handlePersonaCustomizeConfirm(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimSpace(input)
+
+	// Allow empty input as "no" (skip)
+	if input == "" {
+		m.addWizardMessage(fmt.Sprintf(
+			"No problem! You can always customize it later by editing:\n%s\n\nSaving configuration...",
+			m.personaPath,
+		))
+		m.state = setupStateSaving
+		return m, m.saveConfig()
+	}
+
+	// Validate yes/no
+	if !isYesOrNo(input) {
+		m.addWizardMessage("Please answer yes or no (or press Enter to skip).\n\nCustomize now? (yes/no, or press Enter to skip)")
+		return m, nil
+	}
+
+	if !isYes(input) {
+		m.addWizardMessage(fmt.Sprintf(
+			"No problem! You can always customize it later by editing:\n%s\n\nSaving configuration...",
+			m.personaPath,
+		))
+		m.state = setupStateSaving
+		return m, m.saveConfig()
+	}
+
+	m.addWizardMessage("Great! Let's personalize your agent. I'll ask you a few quick questions.\n\nFirst, would you like to give your agent a name? (or press Enter to skip)")
+	m.state = setupStateWaitPersonaName
+	return m, nil
+}
+
+func (m setupModel) handlePersonaNameInput(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimSpace(input)
+	if input != "" {
+		m.personaName = input
+		m.addWizardMessage(fmt.Sprintf("Nice! Your agent will be called %s.\n\nWhat tone or personality should %s have?\n(e.g., warm and encouraging, direct and practical, thoughtful and analytical)\n(or press Enter to skip)", input, input))
+	} else {
+		m.addWizardMessage("What tone or personality should the agent have?\n(e.g., warm and encouraging, direct and practical, thoughtful and analytical)\n(or press Enter to skip)")
+	}
+	m.state = setupStateWaitPersonaTone
+	return m, nil
+}
+
+func (m setupModel) handlePersonaToneInput(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimSpace(input)
+	if input != "" {
+		m.personaTone = input
+	}
+
+	m.addWizardMessage("What areas of your life are you focusing on right now?\n(e.g., career transition, building better habits, managing relationships, personal projects)\n(or press Enter to skip)")
+	m.state = setupStateWaitPersonaGoals
+	return m, nil
+}
+
+func (m setupModel) handlePersonaGoalsInput(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimSpace(input)
+	if input != "" {
+		m.personaGoals = input
+	}
+
+	// Build the customized persona
+	m.addWizardMessage("Perfect! Saving your personalized agent configuration...")
+	m.state = setupStateSavingPersona
+	return m, m.savePersona()
+}
+
+func (m setupModel) savePersona() tea.Cmd {
+	return func() tea.Msg {
+		var personaBuilder strings.Builder
+
+		// Add name if provided
+		if m.personaName != "" {
+			personaBuilder.WriteString(fmt.Sprintf("Your name is %s.\n\n", m.personaName))
+		}
+
+		// Add tone/personality
+		if m.personaTone != "" {
+			personaBuilder.WriteString(fmt.Sprintf("You are %s.\n\n", m.personaTone))
+		} else {
+			personaBuilder.WriteString("You are a calm, practical AI life coach.\n\n")
+		}
+
+		// Add user context/focus areas
+		if m.personaGoals != "" {
+			personaBuilder.WriteString(fmt.Sprintf("Context about me: I'm currently focused on %s.\n\n", m.personaGoals))
+		}
+
+		// Add standard guidelines
+		personaBuilder.WriteString("Be supportive, honest, and grounded.\n")
+		personaBuilder.WriteString("Prefer concrete advice over vague motivation.\n")
+		personaBuilder.WriteString("Keep responses concise unless I ask for more depth.\n")
+		personaBuilder.WriteString("Ask at most one clarifying question when needed.\n")
+
+		err := os.WriteFile(m.personaPath, []byte(personaBuilder.String()), 0o644)
+		return setupPersonaSaveDoneMsg{err: err}
+	}
+}
+
+func (m setupModel) handlePersonaSaveDone(msg setupPersonaSaveDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.addWizardMessage(fmt.Sprintf("Failed to save persona: %v\n\nYou can manually edit it later at:\n%s\n\nSaving configuration...", msg.err, m.personaPath))
+	} else {
+		m.addWizardMessage("Persona saved! ✓\n\nSaving configuration...")
+	}
+
+	m.state = setupStateSaving
+	return m, m.saveConfig()
+}
+
 func loadingTick() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+	return tea.Tick(loadingAnimationInterval, func(time.Time) tea.Msg {
 		return setupLoadingTickMsg{}
 	})
 }
@@ -661,8 +828,9 @@ func renderLoadingAnimation(frame int) string {
 	}
 
 	// Add animated dots
-	dots := strings.Repeat(".", (frame/3)%4)
-	spaces := strings.Repeat(" ", 3-(frame/3)%4)
+	dotsCount := (frame / loadingDotsDivisor) % loadingDotsFrames
+	dots := strings.Repeat(".", dotsCount)
+	spaces := strings.Repeat(" ", loadingDotsFrames-1-dotsCount)
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(dots + spaces))
 
 	return b.String()
@@ -753,25 +921,35 @@ func (m setupModel) View() string {
 
 func isYes(input string) bool {
 	input = strings.ToLower(strings.TrimSpace(input))
-	return input == "y" || input == "yes"
+	return input == "y" || input == "yes" || input == "ye" || input == "yeah"
 }
 
-// Global manager instance (will be set by main)
-var globalManager *llm.Manager
-var globalServerResponse string
+func isNo(input string) bool {
+	input = strings.ToLower(strings.TrimSpace(input))
+	return input == "n" || input == "no" || input == "nope"
+}
 
-func startChatServer(ctx context.Context, config *llm.Config) error {
+func isYesOrNo(input string) bool {
+	return isYes(input) || isNo(input)
+}
+
+// SetupResult contains the result of the setup wizard
+type SetupResult struct {
+	Manager      *llm.Manager
+	SelectedMode string
+}
+
+func startChatServer(ctx context.Context, config *llm.Config) (*llm.Manager, error) {
 	slog.Info("Creating LLM manager")
 	manager, err := llm.NewManager(config)
 	if err != nil {
-		return fmt.Errorf("create LLM manager: %w", err)
+		return nil, fmt.Errorf("create LLM manager: %w", err)
 	}
 
 	slog.Info("Starting chat server")
 	if err := manager.StartChatServer(ctx); err != nil {
-		return fmt.Errorf("start chat server: %w", err)
+		return nil, fmt.Errorf("start chat server: %w", err)
 	}
 
-	globalManager = manager
-	return nil
+	return manager, nil
 }
