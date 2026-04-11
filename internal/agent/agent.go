@@ -5,6 +5,9 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
+
+	"project-orb/internal/text"
 )
 
 const (
@@ -19,17 +22,51 @@ var analysisTaskPrompt string
 //go:embed prompts/summary_task.md
 var summaryTaskPrompt string
 
+//go:embed prompts/startup_task.md
+var startupTaskPrompt string
+
 type Turn struct {
 	User      string
 	Assistant string
+	CreatedAt time.Time
 }
 
 type SessionContext struct {
-	Summary string
-	Recent  []Turn
+	SessionID string
+	StartedAt time.Time
+	Summary   string
+	Recent    []Turn
+}
+
+type MemorySnippet struct {
+	SessionID string
+	Summary   string
+	Excerpt   string
+	Score     int
+}
+
+func NewSessionContext() SessionContext {
+	now := time.Now().UTC()
+	return SessionContext{
+		SessionID: now.Format("2006-01-02-150405"),
+		StartedAt: now,
+	}
+}
+
+func (s *SessionContext) EnsureMetadata() {
+	if s.StartedAt.IsZero() {
+		s.StartedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(s.SessionID) == "" {
+		s.SessionID = s.StartedAt.Format("2006-01-02-150405")
+	}
 }
 
 func (s *SessionContext) AddTurn(turn Turn) {
+	s.EnsureMetadata()
+	if turn.CreatedAt.IsZero() {
+		turn.CreatedAt = time.Now().UTC()
+	}
 	s.Recent = append(s.Recent, turn)
 }
 
@@ -62,18 +99,25 @@ func MaxTotalWords() int {
 }
 
 func buildResponseContext(analysis string) string {
-	return "Analysis:\n" + strings.TrimSpace(analysis)
+	return text.AnalysisContext(analysis)
 }
 
-func buildConversationMessages(systemMessage string, session SessionContext) []chatMessage {
+func buildConversationMessages(systemMessage string, session SessionContext, memories []MemorySnippet) []chatMessage {
 	messages := []chatMessage{
 		{Role: "system", Content: systemMessage},
+	}
+
+	if memoryContext := buildMemoryContext(memories); memoryContext != "" {
+		messages = append(messages, chatMessage{
+			Role:    "user",
+			Content: memoryContext,
+		})
 	}
 
 	if summary := strings.TrimSpace(session.Summary); summary != "" {
 		messages = append(messages, chatMessage{
 			Role:    "user",
-			Content: "Conversation summary:\n" + summary,
+			Content: text.ConversationSummary(summary),
 		})
 	}
 
@@ -89,6 +133,36 @@ func buildConversationMessages(systemMessage string, session SessionContext) []c
 	return messages
 }
 
+func buildMemoryContext(memories []MemorySnippet) string {
+	if len(memories) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(text.RelevantPastSessionSummaries())
+	for _, memory := range memories {
+		summary := strings.TrimSpace(memory.Summary)
+		excerpt := strings.TrimSpace(memory.Excerpt)
+		if summary == "" && excerpt == "" {
+			continue
+		}
+
+		b.WriteString("\n")
+		b.WriteString(text.SessionSummaryHeading(memory.SessionID))
+		if summary != "" {
+			b.WriteString(summary)
+			b.WriteString("\n")
+		}
+		if excerpt != "" {
+			b.WriteString(text.SupportingTranscriptExcerptHeading())
+			b.WriteString(excerpt)
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
 func updateConversationSummary(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 	if len(turns) == 0 {
 		return existingSummary, nil
@@ -99,7 +173,7 @@ func updateConversationSummary(ctx context.Context, client *Client, existingSumm
 	if summary := strings.TrimSpace(existingSummary); summary != "" {
 		messages = append(messages, chatMessage{
 			Role:    "user",
-			Content: "Existing conversation summary:\n" + summary,
+			Content: text.ExistingConversationSummary(summary),
 		})
 	}
 

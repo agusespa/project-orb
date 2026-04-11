@@ -9,6 +9,8 @@ import (
 
 	"project-orb/internal/agent"
 	"project-orb/internal/llm"
+	"project-orb/internal/paths"
+	"project-orb/internal/text"
 )
 
 type Wizard struct {
@@ -17,6 +19,19 @@ type Wizard struct {
 
 func NewWizard(ctx context.Context) *Wizard {
 	return &Wizard{ctx: ctx}
+}
+
+func (w *Wizard) DefaultModelsDirInput() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	if strings.HasSuffix(homeDir, string(os.PathSeparator)) {
+		return homeDir
+	}
+
+	return homeDir + string(os.PathSeparator)
 }
 
 func (w *Wizard) ValidateModelsDir(input string) (string, error) {
@@ -58,12 +73,10 @@ func (w *Wizard) ScanModels(dir string) ([]string, error) {
 }
 
 func (w *Wizard) CheckPersonaExists() (exists bool, personaPath string, err error) {
-	appConfigDir, err := resolveAppConfigDir()
+	personaPath, err = paths.PersonaFilePath()
 	if err != nil {
 		return false, "", err
 	}
-
-	personaPath = filepath.Join(appConfigDir, "persona.md")
 
 	_, err = os.Stat(personaPath)
 	if err == nil {
@@ -78,34 +91,19 @@ func (w *Wizard) CheckPersonaExists() (exists bool, personaPath string, err erro
 	return false, "", err
 }
 
-func resolveAppConfigDir() (string, error) {
-	if xdgConfigHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdgConfigHome != "" {
-		return filepath.Join(xdgConfigHome, "project-orb"), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("determine home directory: %w", err)
-	}
-
-	return filepath.Join(homeDir, ".config", "project-orb"), nil
-}
-
-const DefaultPersonality = "calm, thoughtful, and supportive"
-
 func (w *Wizard) BuildPersona(name, tone string) string {
 	var b strings.Builder
 
 	b.WriteString("# Persona\n\n")
 
 	if name != "" {
-		b.WriteString(fmt.Sprintf("Your name is %s.\n\n", name))
+		b.WriteString(text.PersonaNameLine(name))
 	}
 
 	if tone == "" {
-		tone = DefaultPersonality
+		tone = text.DefaultPersonality
 	}
-	b.WriteString(fmt.Sprintf("You are %s.\n", tone))
+	b.WriteString(text.PersonaToneLine(tone))
 
 	return b.String()
 }
@@ -122,6 +120,9 @@ func (w *Wizard) StartServer(config *llm.Config) (*llm.Manager, error) {
 
 	if err := manager.StartChatServer(w.ctx); err != nil {
 		return manager, fmt.Errorf("start chat server: %w", err)
+	}
+	if err := manager.StartEmbeddingServer(w.ctx); err != nil {
+		return manager, fmt.Errorf("start embedding server: %w", err)
 	}
 
 	return manager, nil

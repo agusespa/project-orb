@@ -4,73 +4,304 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"project-orb/internal/paths"
 )
 
 const (
 	healthCheckInterval = 500 * time.Millisecond
 	serverStartTimeout  = 5 * time.Minute
 	processKillWaitTime = 100 * time.Millisecond
+	gracefulStopTimeout = 2 * time.Second
 )
 
-func killExistingServerOnPort(port int) {
-	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))
-	output, err := cmd.Output()
-	if err == nil && len(output) > 0 {
-		pidStr := strings.TrimSpace(string(output))
-		if pidStr != "" {
-			pid, err := strconv.Atoi(pidStr)
-			if err == nil {
-				slog.Info("Found existing server on port, killing it", "port", port, "pid", pid)
-				killCmd := exec.Command("kill", "-9", fmt.Sprintf("%d", pid))
-				if err := killCmd.Run(); err != nil {
-					slog.Warn("Failed to kill process by port", "pid", pid, "error", err)
-				} else {
-					slog.Info("Killed existing server by port", "pid", pid)
-					time.Sleep(processKillWaitTime)
-					return
-				}
-			}
+type managedServerState struct {
+	ServerType string    `json:"server_type"`
+	PID        int       `json:"pid"`
+	Port       int       `json:"port"`
+	ModelPath  string    `json:"model_path"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
+func ensurePortAvailableForServer(serverType string, port int, modelPath string) error {
+	state, stateErr := readManagedServerState(serverType)
+
+	pids, err := pidsListeningOnPort(port)
+	if err != nil {
+		slog.Warn("Failed to inspect port usage; proceeding without preflight cleanup", "port", port, "error", err)
+		return nil
+	}
+
+	if len(pids) == 0 {
+		if stateErr == nil {
+			_ = removeManagedServerState(serverType)
+		}
+		return nil
+	}
+
+	for _, pid := range pids {
+		command, err := commandLineForPID(pid)
+		if err != nil {
+			return fmt.Errorf("inspect process on port %d (pid %d): %w", port, pid, err)
+		}
+
+		if !isOwnedManagedServer(state, stateErr, serverType, pid, port, modelPath, command) {
+			return fmt.Errorf("port %d already in use by pid %d: %s", port, pid, command)
+		}
+
+		if err := terminateOwnedProcess(pid); err != nil {
+			return fmt.Errorf("stop existing managed server on port %d (pid %d): %w", port, pid, err)
 		}
 	}
 
-	psCmd := exec.Command("pgrep", "-f", fmt.Sprintf("llama-server.*--port %d", port))
-	psOutput, err := psCmd.Output()
-	if err == nil && len(psOutput) > 0 {
-		pids := strings.Split(strings.TrimSpace(string(psOutput)), "\n")
-		for _, pidStr := range pids {
-			if pidStr == "" {
-				continue
-			}
-			pid, err := strconv.Atoi(pidStr)
-			if err != nil {
-				continue
-			}
-			slog.Info("Found existing llama-server process, killing it", "port", port, "pid", pid)
-			killCmd := exec.Command("kill", "-9", fmt.Sprintf("%d", pid))
-			if err := killCmd.Run(); err != nil {
-				slog.Warn("Failed to kill llama-server process", "pid", pid, "error", err)
-			} else {
-				slog.Info("Killed existing llama-server", "pid", pid)
-			}
+	if stateErr == nil {
+		_ = removeManagedServerState(serverType)
+	}
+
+	return nil
+}
+
+func isOwnedManagedServer(state *managedServerState, stateErr error, serverType string, pid int, port int, modelPath string, command string) bool {
+	if stateErr != nil || state == nil {
+		return false
+	}
+
+	if state.ServerType != serverType || state.PID != pid || state.Port != port || state.ModelPath != modelPath {
+		return false
+	}
+
+	return looksLikeManagedLlamaServer(command, port, modelPath)
+}
+
+func pidsListeningOnPort(port int) ([]int, error) {
+	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var pids []int
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			return nil, fmt.Errorf("parse pid %q: %w", line, err)
+		}
+		pids = append(pids, pid)
+	}
+
+	return pids, nil
+}
+
+func commandLineForPID(pid int) (string, error) {
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+func looksLikeManagedLlamaServer(command string, port int, modelPath string) bool {
+	if command == "" {
+		return false
+	}
+
+	portFlag := fmt.Sprintf("--port %d", port)
+	shortPortFlag := fmt.Sprintf("--port=%d", port)
+	modelFlag := "-m " + modelPath
+	shortModelFlag := "-m=" + modelPath
+
+	return strings.Contains(command, "llama-server") &&
+		(strings.Contains(command, portFlag) || strings.Contains(command, shortPortFlag)) &&
+		(strings.Contains(command, modelFlag) || strings.Contains(command, shortModelFlag))
+}
+
+func terminateOwnedProcess(pid int) error {
+	process, err := osFindProcess(pid)
+	if err != nil {
+		return err
+	}
+
+	slog.Info("Stopping existing managed server on occupied port", "pid", pid)
+
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(gracefulStopTimeout)
+	for time.Now().Before(deadline) {
+		running, err := processStillRunningFunc(pid)
+		if err != nil {
+			return err
+		}
+		if !running {
+			time.Sleep(processKillWaitTime)
+			return nil
 		}
 		time.Sleep(processKillWaitTime)
 	}
+
+	slog.Warn("Existing managed server did not exit after SIGTERM; forcing kill", "pid", pid)
+	if err := process.Kill(); err != nil {
+		return err
+	}
+
+	deadline = time.Now().Add(gracefulStopTimeout)
+	for time.Now().Before(deadline) {
+		running, err := processStillRunningFunc(pid)
+		if err != nil {
+			return err
+		}
+		if !running {
+			time.Sleep(processKillWaitTime)
+			return nil
+		}
+		time.Sleep(processKillWaitTime)
+	}
+
+	return fmt.Errorf("process %d still running after forced kill", pid)
+}
+
+var osFindProcess = func(pid int) (processHandle, error) {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return nil, err
+	}
+	return processWrapper{process: process}, nil
+}
+
+var processStillRunningFunc = processStillRunning
+
+type processHandle interface {
+	Signal(sig syscall.Signal) error
+	Kill() error
+}
+
+type processWrapper struct {
+	process *os.Process
+}
+
+func (p processWrapper) Signal(sig syscall.Signal) error {
+	return p.process.Signal(sig)
+}
+
+func (p processWrapper) Kill() error {
+	return p.process.Kill()
+}
+
+func processStillRunning(pid int) (bool, error) {
+	cmd := exec.Command("kill", "-0", strconv.Itoa(pid))
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+
+	return false, err
+}
+
+func managedServerStatePath(serverType string) (string, error) {
+	appDataDir, err := resolveLLMAppDataDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(appDataDir, "servers", serverType+".json"), nil
+}
+
+func resolveLLMAppDataDir() (string, error) {
+	return paths.DataDir()
+}
+
+func writeManagedServerState(state managedServerState) error {
+	path, err := managedServerStatePath(state.ServerType)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create managed server state directory: %w", err)
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal managed server state: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write managed server state: %w", err)
+	}
+
+	return nil
+}
+
+func readManagedServerState(serverType string) (*managedServerState, error) {
+	path, err := managedServerStatePath(serverType)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var state managedServerState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse managed server state: %w", err)
+	}
+
+	return &state, nil
+}
+
+func removeManagedServerState(serverType string) error {
+	path, err := managedServerStatePath(serverType)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove managed server state: %w", err)
+	}
+
+	return nil
 }
 
 type serverInstance struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	done   chan struct{}
+	cmd        *exec.Cmd
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	done       chan struct{}
+	serverType string
+	modelPath  string
+	port       int
 }
 
 type Manager struct {
@@ -121,7 +352,7 @@ func (m *Manager) StartChatServer(ctx context.Context) error {
 		m.config.LlamaCpp.ChatPort,
 		m.config.ChatModelPath(),
 		args,
-		func(port int) error { return m.waitForChatServer(port) },
+		func(ctx context.Context, port int) error { return m.waitForChatServer(ctx, port) },
 	)
 }
 
@@ -141,7 +372,7 @@ func (m *Manager) StartEmbeddingServer(ctx context.Context) error {
 		m.config.LlamaCpp.EmbeddingPort,
 		m.config.EmbeddingModelPath(),
 		args,
-		func(port int) error { return m.waitForEmbeddingServer(port) },
+		func(ctx context.Context, port int) error { return m.waitForEmbeddingServer(ctx, port) },
 	)
 }
 
@@ -152,7 +383,7 @@ func (m *Manager) startServer(
 	port int,
 	modelPath string,
 	args []string,
-	waitFunc func(int) error,
+	waitFunc func(context.Context, int) error,
 ) error {
 	instance.mu.Lock()
 	defer instance.mu.Unlock()
@@ -161,7 +392,13 @@ func (m *Manager) startServer(
 		return fmt.Errorf("%s server already running", serverType)
 	}
 
-	killExistingServerOnPort(port)
+	instance.serverType = serverType
+	instance.modelPath = modelPath
+	instance.port = port
+
+	if err := ensurePortAvailableForServer(serverType, port, modelPath); err != nil {
+		return err
+	}
 
 	slog.Info("Starting server", "type", serverType, "model", modelPath, "port", port)
 
@@ -176,23 +413,42 @@ func (m *Manager) startServer(
 	if err := cmd.Start(); err != nil {
 		cancel()
 		close(instance.done)
+		instance.cancel = nil
+		instance.done = nil
 		return fmt.Errorf("start %s server: %w", serverType, err)
 	}
 
 	instance.cmd = cmd
+
+	if err := writeManagedServerState(managedServerState{
+		ServerType: serverType,
+		PID:        cmd.Process.Pid,
+		Port:       port,
+		ModelPath:  modelPath,
+		StartedAt:  time.Now().UTC(),
+	}); err != nil {
+		_ = m.stopServerLocked(instance, serverType)
+		return fmt.Errorf("record %s server state: %w", serverType, err)
+	}
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, serverStartTimeout)
 	defer waitCancel()
 
 	waitDone := make(chan error, 1)
 	go func() {
-		waitDone <- waitFunc(port)
+		waitDone <- waitFunc(waitCtx, port)
 	}()
 
 	select {
 	case err := <-waitDone:
 		if err != nil {
 			_ = m.stopServerLocked(instance, serverType)
+			if waitCtx.Err() != nil {
+				if ctx.Err() != nil {
+					return fmt.Errorf("%s server startup cancelled", serverType)
+				}
+				return fmt.Errorf("%s server startup timeout after %v", serverType, serverStartTimeout)
+			}
 			return fmt.Errorf("%s server failed to start: %w", serverType, err)
 		}
 	case <-waitCtx.Done():
@@ -240,34 +496,60 @@ func (m *Manager) stopServerLocked(instance *serverInstance, serverType string) 
 		slog.Info("Stopping server (no process)", "type", serverType)
 	}
 
-	// Cancel the context first to signal the process to stop
-	if instance.cancel != nil {
-		instance.cancel()
-	}
-
-	// Kill the process
-	if instance.cmd.Process != nil {
+	if instance.cmd.Process != nil && instance.done != nil {
 		pid := instance.cmd.Process.Pid
-		if err := instance.cmd.Process.Kill(); err != nil {
-			slog.Error("Failed to kill server process", "type", serverType, "error", err, "pid", pid)
+		if err := instance.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			slog.Warn("Failed to send graceful stop signal", "type", serverType, "error", err, "pid", pid)
 		} else {
-			slog.Info("Server process killed", "type", serverType, "pid", pid)
+			slog.Info("Sent graceful stop signal", "type", serverType, "pid", pid)
 		}
-	}
 
-	// Wait for the process to exit with a timeout
-	if instance.done != nil {
 		select {
 		case <-instance.done:
 			slog.Debug("Server process exited cleanly", "type", serverType)
-		case <-time.After(2 * time.Second):
+		case <-time.After(gracefulStopTimeout):
+			slog.Warn("Graceful shutdown timed out, forcing kill", "type", serverType, "pid", pid)
+			if instance.cancel != nil {
+				instance.cancel()
+			}
+			if err := instance.cmd.Process.Kill(); err != nil {
+				slog.Error("Failed to kill server process", "type", serverType, "error", err, "pid", pid)
+			} else {
+				slog.Info("Server process killed", "type", serverType, "pid", pid)
+			}
+
+			select {
+			case <-instance.done:
+				slog.Debug("Server process exited after force kill", "type", serverType)
+			case <-time.After(gracefulStopTimeout):
+				slog.Warn("Timeout waiting for killed server process to exit", "type", serverType, "pid", pid)
+			}
+		}
+	} else if instance.done != nil {
+		select {
+		case <-instance.done:
+			slog.Debug("Server process exited cleanly", "type", serverType)
+		case <-time.After(gracefulStopTimeout):
 			slog.Warn("Timeout waiting for server process to exit", "type", serverType)
 		}
+	}
+
+	if instance.cancel != nil {
+		instance.cancel()
 	}
 
 	instance.cmd = nil
 	instance.cancel = nil
 	instance.done = nil
+	instance.serverType = ""
+	instance.modelPath = ""
+	instance.port = 0
+
+	if serverType != "" {
+		if err := removeManagedServerState(serverType); err != nil {
+			slog.Warn("Failed to remove managed server state", "type", serverType, "error", err)
+		}
+	}
 
 	slog.Info("Server stopped", "type", serverType)
 	return nil
@@ -291,12 +573,7 @@ func (m *Manager) Shutdown() error {
 	return nil
 }
 
-func (m *Manager) waitForChatServer(port int) error {
-	// This function is called from a goroutine in startServer, and the parent
-	// context cancellation is handled by the select statement there.
-	// We don't need to check context here since the goroutine will be abandoned
-	// when the select returns on context cancellation.
-
+func (m *Manager) waitForChatServer(ctx context.Context, port int) error {
 	client := &http.Client{Timeout: 60 * time.Second}
 	completionURL := fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port)
 
@@ -306,6 +583,10 @@ func (m *Manager) waitForChatServer(port int) error {
 	defer ticker.Stop()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		testRequest := map[string]interface{}{
 			"model":      "local-model",
 			"messages":   []map[string]string{{"role": "user", "content": "hi"}},
@@ -318,10 +599,12 @@ func (m *Manager) waitForChatServer(port int) error {
 			return fmt.Errorf("marshal test request: %w", err)
 		}
 
-		req, err := http.NewRequest(http.MethodPost, completionURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, completionURL, bytes.NewReader(body))
 		if err != nil {
 			slog.Debug("Failed to create request", "error", err)
-			<-ticker.C
+			if err := waitForNextProbe(ctx, ticker); err != nil {
+				return err
+			}
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -329,7 +612,9 @@ func (m *Manager) waitForChatServer(port int) error {
 		resp, err := client.Do(req)
 		if err != nil {
 			slog.Debug("Request failed, model still loading", "error", err)
-			<-ticker.C
+			if err := waitForNextProbe(ctx, ticker); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -337,7 +622,9 @@ func (m *Manager) waitForChatServer(port int) error {
 		resp.Body.Close()
 		if err != nil {
 			slog.Debug("Failed to read response body", "error", err)
-			<-ticker.C
+			if err := waitForNextProbe(ctx, ticker); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -360,11 +647,13 @@ func (m *Manager) waitForChatServer(port int) error {
 			slog.Debug("Model still loading", "port", port, "status", resp.StatusCode)
 		}
 
-		<-ticker.C
+		if err := waitForNextProbe(ctx, ticker); err != nil {
+			return err
+		}
 	}
 }
 
-func (m *Manager) waitForEmbeddingServer(port int) error {
+func (m *Manager) waitForEmbeddingServer(ctx context.Context, port int) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 
@@ -374,10 +663,21 @@ func (m *Manager) waitForEmbeddingServer(port int) error {
 	defer ticker.Stop()
 
 	for {
-		resp, err := client.Get(healthURL)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err != nil {
+			return fmt.Errorf("create health check request: %w", err)
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			slog.Debug("Health check failed, model still loading", "error", err)
-			<-ticker.C
+			if err := waitForNextProbe(ctx, ticker); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -389,7 +689,18 @@ func (m *Manager) waitForEmbeddingServer(port int) error {
 		}
 
 		slog.Debug("Model still loading", "port", port, "status", resp.StatusCode)
-		<-ticker.C
+		if err := waitForNextProbe(ctx, ticker); err != nil {
+			return err
+		}
+	}
+}
+
+func waitForNextProbe(ctx context.Context, ticker *time.Ticker) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ticker.C:
+		return nil
 	}
 }
 

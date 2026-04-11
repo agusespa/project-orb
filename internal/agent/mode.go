@@ -2,13 +2,16 @@ package agent
 
 import (
 	_ "embed"
-	"fmt"
+	"errors"
 	"strings"
+
+	"project-orb/internal/text"
 )
 
 type ModeID string
 
 const (
+	ModeSetup             ModeID = "setup"
 	ModeCoach             ModeID = "coach"
 	ModePerformanceReview ModeID = "performance-review"
 	ModeAnalyst           ModeID = "analyst"
@@ -19,6 +22,8 @@ type Mode struct {
 	Name         string
 	Description  string
 	Instructions string
+	ToolNames    []string
+	Selectable   bool
 }
 
 //go:embed prompts/coach_instructions.md
@@ -27,30 +32,55 @@ var coachInstructions string
 //go:embed prompts/performance_review_instructions.md
 var performanceReviewInstructions string
 
-//go:embed prompts/analyst_instructions.md
-var analystInstructions string
+//go:embed prompts/analysis_instructions.md
+var analysisInstructions string
 
-func BuiltInModes() []Mode {
+func AllModes() []Mode {
 	return []Mode{
 		{
+			ID:          ModeSetup,
+			Name:        text.ModeSetupName,
+			Description: text.ModeSetupDescription,
+			Selectable:  false,
+		},
+		{
 			ID:           ModeCoach,
-			Name:         "Coach",
-			Description:  "Guidance for everyday reflection, decisions, and next steps.",
+			Name:         text.ModeCoachName,
+			Description:  text.ModeCoachDescription,
 			Instructions: coachInstructions,
+			ToolNames:    nil,
+			Selectable:   true,
 		},
 		{
 			ID:           ModePerformanceReview,
-			Name:         "Performance Review",
-			Description:  "Structured feedback on effectiveness, habits and growth areas.",
+			Name:         text.ModePerformanceName,
+			Description:  text.ModePerformanceDescription,
 			Instructions: performanceReviewInstructions,
+			ToolNames:    nil,
+			Selectable:   true,
 		},
 		{
 			ID:           ModeAnalyst,
-			Name:         "Analyst",
-			Description:  "Deeper psychoanalytic questioning to examine motives and patterns.",
-			Instructions: analystInstructions,
+			Name:         text.ModeAnalystName,
+			Description:  text.ModeAnalystDescription,
+			Instructions: analysisInstructions,
+			ToolNames: []string{
+				toolSearchMemories,
+				toolLoadMemoryExcerpt,
+			},
+			Selectable: true,
 		},
 	}
+}
+
+func BuiltInModes() []Mode {
+	var modes []Mode
+	for _, mode := range AllModes() {
+		if mode.Selectable {
+			modes = append(modes, mode)
+		}
+	}
+	return modes
 }
 
 func DefaultMode() Mode {
@@ -59,7 +89,7 @@ func DefaultMode() Mode {
 
 func FindMode(name string) (Mode, bool) {
 	normalized := strings.TrimSpace(strings.ToLower(name))
-	for _, mode := range BuiltInModes() {
+	for _, mode := range AllModes() {
 		if string(mode.ID) == normalized {
 			return mode, true
 		}
@@ -76,12 +106,12 @@ func (m Mode) SystemMessage() (string, error) {
 	persona = strings.TrimSpace(persona)
 
 	if persona == "" {
-		return "", fmt.Errorf("persona is empty")
+		return "", errors.New(text.PersonaEmptyError)
 	}
 
 	modeInstructions := strings.TrimSpace(m.Instructions)
 	if modeInstructions == "" {
-		return "", fmt.Errorf("mode %q has no instructions configured", m.ID)
+		return "", errors.New(text.ModeInstructionsMissing(string(m.ID)))
 	}
 
 	return strings.Join([]string{
@@ -89,4 +119,13 @@ func (m Mode) SystemMessage() (string, error) {
 		modeInstructions,
 		persona,
 	}, "\n\n---\n\n"), nil
+}
+
+func (m Mode) AllowsTool(name string) bool {
+	for _, toolName := range m.ToolNames {
+		if toolName == name {
+			return true
+		}
+	}
+	return false
 }

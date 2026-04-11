@@ -1,5 +1,7 @@
 Analyze the situation before responding.
 
+If tools are available and recalling prior sessions would materially improve the analysis, use them instead of guessing.
+
 Identify:
 - what the user is really asking (surface request vs. underlying need)
 - emotional context or tension

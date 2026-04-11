@@ -28,19 +28,10 @@ func TestClientCompleteUsesConfiguredEndpoint(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(streamChunk{
-			Choices: []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			}{
+		if err := json.NewEncoder(w).Encode(completionResponse{
+			Choices: []completionChoice{
 				{
-					Message: struct {
-						Content string `json:"content"`
-					}{Content: "ready"},
+					Message: chatMessage{Content: "ready"},
 				},
 			},
 		}); err != nil {
@@ -111,6 +102,93 @@ func TestClientStreamMessagesReportsDecodeErrors(t *testing.T) {
 	}
 }
 
+func TestClientCompleteWithToolsExecutesToolCalls(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			if len(req.Tools) != 1 {
+				t.Fatalf("expected 1 tool in request, got %d", len(req.Tools))
+			}
+			_ = json.NewEncoder(w).Encode(completionResponse{
+				Choices: []completionChoice{
+					{
+						Message: chatMessage{
+							Role: "assistant",
+							ToolCalls: []chatToolCall{
+								{
+									ID:   "call-1",
+									Type: "function",
+									Function: chatToolCallFunction{
+										Name:      "lookup_memory",
+										Arguments: `{"query":"fear of shipping"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case 2:
+			if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "tool" {
+				t.Fatalf("expected tool result message in second request, got %#v", req.Messages)
+			}
+			_ = json.NewEncoder(w).Encode(completionResponse{
+				Choices: []completionChoice{
+					{
+						Message: chatMessage{Role: "assistant", Content: "final answer"},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected extra request %d", requests)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(ClientConfig{
+		CompletionsURL: server.URL + "/v1/chat/completions",
+		Model:          "test-model",
+		HTTPClient:     server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	called := 0
+	message, err := client.CompleteWithTools(context.Background(), []chatMessage{{Role: "user", Content: "hello"}}, []ToolHandler{
+		{
+			Definition: chatTool{
+				Type: "function",
+				Function: chatToolFunction{
+					Name: "lookup_memory",
+				},
+			},
+			Execute: func(ctx context.Context, args json.RawMessage) (string, error) {
+				called++
+				return `{"ok":true}`, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteWithTools() error = %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("expected tool to be executed once, got %d", called)
+	}
+	if message.Content != "final answer" {
+		t.Fatalf("expected final answer, got %q", message.Content)
+	}
+}
+
 // TestStreamMessagesCancellation verifies that context cancellation stops streaming
 func TestStreamMessagesCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,19 +196,10 @@ func TestStreamMessagesCancellation(t *testing.T) {
 
 		// Send a few tokens
 		for i := 0; i < 3; i++ {
-			chunk := streamChunk{
-				Choices: []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				}{
+			chunk := completionResponse{
+				Choices: []completionChoice{
 					{
-						Delta: struct {
-							Content string `json:"content"`
-						}{Content: "token"},
+						Delta: chatMessage{Content: "token"},
 					},
 				},
 			}
@@ -203,19 +272,10 @@ func TestCompleteWithCanceledContext(t *testing.T) {
 		// Simulate slow response
 		time.Sleep(200 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(streamChunk{
-			Choices: []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			}{
+		_ = json.NewEncoder(w).Encode(completionResponse{
+			Choices: []completionChoice{
 				{
-					Message: struct {
-						Content string `json:"content"`
-					}{Content: "response"},
+					Message: chatMessage{Content: "response"},
 				},
 			},
 		})
@@ -248,19 +308,10 @@ func TestStreamMessagesWithTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		// Send one token then hang
-		chunk := streamChunk{
-			Choices: []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			}{
+		chunk := completionResponse{
+			Choices: []completionChoice{
 				{
-					Delta: struct {
-						Content string `json:"content"`
-					}{Content: "token"},
+					Delta: chatMessage{Content: "token"},
 				},
 			},
 		}
@@ -335,19 +386,10 @@ func TestStreamMessagesContextCheckInLoop(t *testing.T) {
 
 		// Send many tokens
 		for i := 0; i < 100; i++ {
-			chunk := streamChunk{
-				Choices: []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				}{
+			chunk := completionResponse{
+				Choices: []completionChoice{
 					{
-						Delta: struct {
-							Content string `json:"content"`
-						}{Content: "x"},
+						Delta: chatMessage{Content: "x"},
 					},
 				},
 			}

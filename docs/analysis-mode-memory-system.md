@@ -2,119 +2,152 @@
 
 ## Overview
 
-Analysis mode provides a memory system that enables continuous performance tracking and contextual feedback across sessions. The system persists session data, generates summaries, and uses vector search to provide relevant historical context during conversations.
+Analysis mode has a tiered memory system for carrying context across sessions. It uses:
+- markdown transcript files
+- markdown summary files
+- embedding vectors saved as JSON sidecar files
+- model-invoked memory tools during the analysis step
 
-## Session Lifecycle
+## How Memory Works
 
-### Session Start
-1. Agent checks for previous session summary
-2. If found, agent reviews it to determine:
-   - Whether to continue the previous analysis topic
-   - What progress has been made
-   - What areas need attention
-3. Agent proposes either:
-   - Continuing the previous topic
-   - Starting a new analysis topic based on context
+The system has three main parts:
 
-### During Session
-- Conversation history is maintained in memory
-- Existing compaction strategy handles summarization when context grows large
-- Raw conversation text is preserved before compaction occurs
-- Agent can query vector DB for relevant past insights when discussing specific topics
+1. Session summaries
+When an analysis session is explicitly wrapped, the app generates a structured summary and saves it.
 
-### Session End
-Sessions end when:
-- User explicitly ends the session (via command)
-- User switches to a different mode
-- Application closes
+2. Embeddings
+That saved summary is embedded with the local embedding model and the vector is stored on disk.
 
-On session end:
-1. Complete session transcript saved to markdown file
-2. Final summary generated
-3. Session content tokenized and embedded into vector DB
+3. Retrieval
+Later, when the user returns to Analysis mode or sends a new message, the model can choose to search saved analysis session summaries and load a supporting transcript excerpt through tools exposed by the app.
+
+## Request Flow
+
+Analysis mode uses a two-step response pipeline:
+
+1. `GenerateAnalysis`
+The model gets the current session summary and recent turns.
+If it needs cross-session recall, it can call tools before producing a short internal analysis.
+
+2. `GenerateResponse`
+The app sends that internal analysis back to the model and streams the final user-facing response.
+
+This keeps tool use in the planning stage and keeps the streamed response path simple.
+
+## Memory Tools
+
+Analysis mode currently exposes two tools:
+
+1. `search_memories`
+Searches prior saved session summaries semantically and returns matching session ids, summaries, and similarity scores.
+
+2. `load_memory_excerpt`
+Loads a short transcript excerpt for a previously found session when the model wants exact prior details.
+
+These tools are only available in Analysis mode. Tool access is mode-scoped so each mode sees only the capabilities that fit its job.
+
+## Startup Behavior
+
+When Analysis mode starts, the app uses a two-step startup flow.
+
+1. It shows a hard-coded welcome message first. This is not generated dynamically.
+2. After the welcome:
+  - if there is **no saved summary**, the app shows another hard-coded message explaining that there is no previous saved session and suggesting a few natural ways to begin
+  - if there **is** a saved summary, the app sends that summary to the model and asks it to suggest a few strong places to start the new session
+
+## Save Behavior
+
+analysis sessions are **not** saved automatically.
+If the current analysis session has unsaved turns, the UI warns that the session will be discarded unless the user wraps it first.
+
+### What Saves a Session
+
+Only the `/wrap` command saves the current analysis session.
+
+When `/wrap` runs:
+
+1. The current session is finalized
+2. A structured summary is generated
+3. The full transcript is written to disk
+4. The summary is written to disk
+5. An embedding for the summary is generated
+6. The embedding vector is written to disk as JSON
+7. The app quits
 
 ## Storage Structure
 
-### Session Files
-```
-.project-orb/
+The app stores analysis-mode memory in the app data directory, under the analysis sessions subtree.
+
+Typical files look like this:
+
+```text
+<app-data-dir>/
   sessions/
     analysis/
-      YYYY-MM-DD-HHMMSS-session.md       # Full transcript
-      YYYY-MM-DD-HHMMSS-summary.md       # Session summary
+      YYYY-MM-DD-HHMMSS-session.md
+      YYYY-MM-DD-HHMMSS-summary.md
+      YYYY-MM-DD-HHMMSS-summary.embedding.json
 ```
 
-### Session Markdown Format
-```markdown
-# Analysis Session - [Date/Time]
+The exact app data base directory follows the app's configured local data path resolution.
 
-## Conversation
-[Full conversation transcript with timestamps]
+## What Gets Stored
 
-## Key Insights
-[Extracted during session or at end]
+### Transcript File
 
-## Action Items
-[If any were identified]
-```
+The transcript file stores:
 
-### Summary Format
-```markdown
-# Session Summary - [Date/Time]
+- session timestamp
+- mode
+- saved summary
+- completed conversation turns
 
-## Overview
-[Brief description of session focus]
+### Summary File
 
-## Topics Covered
-- Topic 1
-- Topic 2
+The summary file stores the structured session summary.
 
-## Key Observations
-- Observation 1
-- Observation 2
+The current summary prompt asks for these sections:
 
-## Recommendations Made
-- Recommendation 1
-- Recommendation 2
+- `## Overview`
+- `## Emotional Context`
+- `## Patterns`
+- `## Decisions`
+- `## Open Questions`
 
-## Progress Notes
-[Any progress on previous topics]
+### Embedding File
 
-## Next Steps
-[Suggested areas for next session]
-```
+The embedding file stores the summary embedding vector as JSON.
 
-## Vector Database
+This is the vector used later for semantic retrieval.
 
-### Purpose
-Enable semantic search across all historical analysis sessions to:
-- Find relevant past observations when discussing specific topics
-- Track progress on recurring themes
-- Provide context-aware feedback based on historical patterns
+## How Semantic Retrieval Works
 
-### Chunking Strategy
-Content is chunked by semantic units:
-- Individual insights/observations
-- Recommendations
-- User feedback
-- Metric discussions
-- Topic-based conversation segments
+When the app needs relevant past context:
 
-### Metadata Stored with Embeddings
-```json
-{
-  "session_id": "YYYY-MM-DD-HHMMSS",
-  "timestamp": "ISO-8601",
-  "content_type": "observation|recommendation|metric|feedback",
-  "topics": ["topic1", "topic2"],
-  "chunk_text": "actual content"
-}
-```
+1. It embeds the current query text
+2. It loads saved summary embeddings from disk
+3. It computes similarity between the query vector and each saved summary vector
+4. It ranks the summaries by cosine similarity
+5. The model decides whether it should call `search_memories`
+6. If the model needs exact prior detail, it can call `load_memory_excerpt` for a returned session id
+7. Tool results are fed back into the model during the Analysis step before the final response is written
 
-### Search Strategy
-During a session, when discussing specific topics:
-1. Extract key terms/concepts from current conversation
-2. Query vector DB for semantically similar past content
-3. Filter by relevance score (threshold TBD)
-4. Present relevant historical context to agent
-5. Agent uses this to provide feedback on progress/patterns
+## Why This Shape
+
+This design is intentionally simple:
+
+- the app stores and retrieves memory data
+- the model decides when memory lookup is needed
+- tools run before the final response is streamed
+- only Analysis mode gets memory tools right now
+
+That avoids hard-coded retrieval heuristics while keeping the response pipeline understandable and debuggable.
+
+## Adding More Tools
+
+When adding new tools:
+
+1. Implement the tool in the agent layer
+2. Add it to the relevant mode's `ToolNames`
+3. Expose it during the analysis step for that mode
+4. Keep the final response step focused on writing the answer, not planning

@@ -72,8 +72,6 @@ type ModeTheme struct {
 	CoachNameFg    lipgloss.Color
 }
 
-const ModeSetup agent.ModeID = "setup"
-
 func ThemeForMode(id agent.ModeID) ModeTheme {
 	switch id {
 	case agent.ModePerformanceReview:
@@ -94,7 +92,7 @@ func ThemeForMode(id agent.ModeID) ModeTheme {
 			UserNameFg:     lipgloss.Color("120"),
 			CoachNameFg:    lipgloss.Color("71"),
 		}
-	case ModeSetup:
+	case agent.ModeSetup:
 		return ModeTheme{
 			Border:         lipgloss.Color("130"),
 			StatusFg:       lipgloss.Color("173"),

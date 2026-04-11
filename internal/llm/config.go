@@ -6,11 +6,8 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
-)
 
-const (
-	appName    = "project-orb"
-	configFile = "config.yaml"
+	"project-orb/internal/paths"
 )
 
 type Config struct {
@@ -38,7 +35,7 @@ func DefaultConfig() Config {
 }
 
 func LoadConfig() (*Config, error) {
-	configPath, err := getConfigPath()
+	configPath, err := paths.ConfigFilePath()
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +65,7 @@ func SaveConfig(config *Config) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	configPath, err := getConfigPath()
+	configPath, err := paths.ConfigFilePath()
 	if err != nil {
 		return err
 	}
@@ -138,21 +135,4 @@ func (c *Config) ChatModelPath() string {
 
 func (c *Config) EmbeddingModelPath() string {
 	return filepath.Join(c.LlamaCpp.ModelsDir, c.LlamaCpp.EmbeddingModel)
-}
-
-func getConfigPath() (string, error) {
-	configDir, err := getConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, configFile), nil
-}
-
-func getConfigDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
-	}
-
-	return filepath.Join(homeDir, ".config", appName), nil
 }

@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"project-orb/internal/agent"
+	"project-orb/internal/text"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func renderMessageBlock(
@@ -45,11 +47,15 @@ func RenderAgentBlock(width int, nameStyle, bodyStyle lipgloss.Style, label stri
 }
 
 const (
-	thinkingText           = "Thinking..."
+	ThinkingText           = text.ThinkingText
+	LoadingModelText       = text.LoadingModelText
+	LoadingMemoryText      = text.LoadingMemoryText
 	ChatPadding            = 2
 	InputHeight            = 3
 	StatusBarHeight        = 1
+	WarningAreaHeight      = 3
 	maxModeSelectorLines   = 10
+	maxHintsOverlayLines   = 12
 	messageBlockWidthRatio = 0.82
 
 	contextGreenThreshold  = 60.0
@@ -62,54 +68,79 @@ const (
 	ThinkingColorSubdued = "245"
 )
 
-func (m Model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+func ChatPaneHeight(totalHeight int, selectorHeight int) int {
+	return max(1, totalHeight-InputHeight-selectorHeight-StatusBarHeight-WarningAreaHeight)
+}
+
+func TrimContentToHeight(content string, height int) string {
+	if height <= 0 {
+		return ""
 	}
 
-	contentWidth := m.width - ChatPadding
+	lines := strings.Split(content, "\n")
+	if len(lines) <= height {
+		return content
+	}
+
+	return strings.Join(lines[len(lines)-height:], "\n")
+}
+
+func RenderChatShell(width int, chatHeight int, chatContent string, warningMessage string, inputPane string, extraPane string, statusBar string) string {
+	chatPane := RenderChatPane(width, chatHeight, chatContent)
+	warningArea := RenderWarningArea(width, warningMessage)
+	return RenderScreen(chatPane, warningArea, inputPane, extraPane, statusBar)
+}
+
+func (m Model) View() string {
+	if m.width == 0 || m.height == 0 {
+		return text.LoadingPlaceholder
+	}
+
+	if !m.viewport.Ready() {
+		return text.InitializingPlaceholder
+	}
+
 	statusBar := m.renderStatusBar(m.width)
 
 	var modeSelector string
+	var hintsOverlay string
 	if m.modeSelector.active {
 		modeSelector = m.renderModeSelector(m.width, maxModeSelectorLines)
+	} else if m.hintsOverlay.active {
+		hintsOverlay = m.renderHintsOverlay(m.width, maxHintsOverlayLines)
 	}
 
-	selectorHeight := lipgloss.Height(modeSelector)
-	chatHeight := max(1, m.height-InputHeight-selectorHeight-StatusBarHeight)
-
-	chatPane := lipgloss.NewStyle().
-		Width(m.width).
-		Height(chatHeight).
-		Padding(0, 1, 2, 1).
-		Render(m.renderChatContent(contentWidth, chatHeight))
-
-	inputPane := m.styles.InputBox.
-		Width(m.width).
-		Render(m.renderInputContent())
-
-	panes := []string{chatPane, inputPane}
-	if modeSelector != "" {
-		panes = append(panes, modeSelector)
+	inputPane := RenderInputBox(m.width, m.styles.InputBox, ThemeForMode(m.currentMode.ID).Border, m.input, !m.stream.active && !m.loadingAnalystMessage, text.TypeYourMessagePrompt)
+	extraPane := modeSelector
+	if hintsOverlay != "" {
+		extraPane = hintsOverlay
 	}
-	panes = append(panes, statusBar)
 
-	return lipgloss.JoinVertical(lipgloss.Left, panes...)
+	return RenderChatShell(m.width, m.viewport.Height(), m.viewport.View(), m.statusMessage, inputPane, extraPane, statusBar)
 }
 
-func (m Model) renderChatContent(width int, maxLines int) string {
+func (m Model) renderChatContent(width int) string {
 	var blocks []string
 
-	if status := strings.TrimSpace(m.statusMessage); status != "" {
-		blocks = append(blocks, m.styles.MetaStyle.Render(status))
-	}
+	// Render startup messages with loading animation inline if needed
+	for i, message := range m.startupMessages {
+		if strings.TrimSpace(message) == "" {
+			continue
+		}
 
-	if summary := strings.TrimSpace(m.session.Summary); summary != "" {
-		summaryBlock := lipgloss.JoinVertical(lipgloss.Left,
-			m.styles.SummaryTitleStyle.Render("Conversation summary"),
-			m.styles.SummaryBodyStyle.Render(summary),
-		)
-		blocks = append(blocks, summaryBlock)
+		body := message
+		// If loading analyst message and this is the last startup message, append loading animation
+		if m.loadingAnalystMessage && i == len(m.startupMessages)-1 {
+			loadingText := RenderLoadingAnimation(m.analystLoadingFrame, text.LoadingMemoryText, ThinkingColorBright, ThinkingColorMedium, ThinkingColorDim, ThinkingColorSubdued)
+			body = strings.TrimRight(body, "\n")
+			if strings.TrimSpace(body) != "" {
+				body += "\n\n" + loadingText
+			} else {
+				body = loadingText
+			}
+		}
+
+		blocks = append(blocks, RenderAgentBlock(width, m.styles.CoachNameStyle, m.styles.CoachBodyStyle, m.agentName, body))
 	}
 
 	for _, turn := range m.session.Recent {
@@ -117,7 +148,7 @@ func (m Model) renderChatContent(width int, maxLines int) string {
 			continue
 		}
 		if strings.TrimSpace(turn.User) != "" {
-			blocks = append(blocks, RenderUserBlock(width, m.styles.UserNameStyle, m.styles.UserBodyStyle, "You", turn.User))
+			blocks = append(blocks, RenderUserBlock(width, m.styles.UserNameStyle, m.styles.UserBodyStyle, text.UserLabel, turn.User))
 		}
 		if strings.TrimSpace(turn.Assistant) != "" {
 			blocks = append(blocks, RenderAgentBlock(width, m.styles.CoachNameStyle, m.styles.CoachBodyStyle, m.agentName, turn.Assistant))
@@ -125,11 +156,11 @@ func (m Model) renderChatContent(width int, maxLines int) string {
 	}
 
 	if strings.TrimSpace(m.pendingPrompt) != "" && m.stream.active {
-		blocks = append(blocks, RenderUserBlock(width, m.styles.UserNameStyle, m.styles.UserBodyStyle, "You", m.pendingPrompt))
+		blocks = append(blocks, RenderUserBlock(width, m.styles.UserNameStyle, m.styles.UserBodyStyle, text.UserLabel, m.pendingPrompt))
 	}
 
 	if m.err != nil {
-		blocks = append(blocks, m.styles.ErrorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+		blocks = append(blocks, m.styles.ErrorStyle.Render(fmt.Sprintf("%s%v", text.ErrorPrefix, m.err)))
 	}
 
 	if strings.TrimSpace(m.output) != "" || m.stream.active {
@@ -140,8 +171,7 @@ func (m Model) renderChatContent(width int, maxLines int) string {
 		return ""
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left, blocks...)
-	return m.truncateToMaxLines(content, maxLines)
+	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
 func (m Model) renderCurrentAgentOutput(width int) string {
@@ -156,27 +186,103 @@ func (m Model) renderCurrentAgentOutput(width int) string {
 	return RenderAgentBlock(width, m.styles.CoachNameStyle, m.styles.CoachBodyStyle, m.agentName, output)
 }
 
-func (m Model) truncateToMaxLines(content string, maxLines int) string {
-	lines := strings.Split(content, "\n")
-	if len(lines) <= maxLines {
-		return content
+func RenderWarningArea(width int, statusMessage string) string {
+	if width <= 0 {
+		return ""
 	}
-	return strings.Join(lines[len(lines)-maxLines:], "\n")
+
+	warningStyle := lipgloss.NewStyle().
+		Width(width).
+		Height(WarningAreaHeight).
+		PaddingLeft(1).
+		PaddingRight(1).
+		PaddingTop(1).
+		PaddingBottom(0).
+		Foreground(lipgloss.Color(ColorWarning)).
+		Bold(true).
+		AlignVertical(lipgloss.Bottom)
+
+	status := strings.TrimSpace(statusMessage)
+	if status == "" {
+		return warningStyle.Render("")
+	}
+
+	availableWidth := width - ChatPadding
+	if availableWidth <= 0 {
+		return warningStyle.Render("")
+	}
+
+	wrapped := ansi.Wrap(status, availableWidth, "")
+	lines := strings.Split(wrapped, "\n")
+	maxVisibleLines := WarningAreaHeight - 1
+	if len(lines) > maxVisibleLines {
+		lines = lines[:maxVisibleLines]
+		lines[maxVisibleLines-1] = ansi.Truncate(lines[maxVisibleLines-1], availableWidth, "")
+	}
+
+	return warningStyle.Render(strings.Join(lines, "\n"))
 }
 
-func (m Model) renderInputContent() string {
-	text := m.input
-	if text == "" && !m.stream.active {
-		text = InputCursor + "Type your message and press Enter"
-		text = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubdued)).Italic(true).Render(text)
-	} else if !m.stream.active {
-		text = m.input + InputCursor
+func RenderInputText(input string, interactive bool, placeholder string) string {
+	switch {
+	case interactive && input == "":
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ColorSubdued)).
+			Italic(true).
+			Render(InputCursor + placeholder)
+	case interactive:
+		return input + InputCursor
+	default:
+		return input
+	}
+}
+
+func ChatContentWidth(width int) int {
+	return width - ChatPadding
+}
+
+func RenderChatPane(width int, height int, content string) string {
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Padding(0, 1, 0, 1).
+		Render(content)
+}
+
+func RenderInputBox(width int, style lipgloss.Style, promptColor lipgloss.Color, input string, interactive bool, placeholder string) string {
+	prompt := lipgloss.NewStyle().Foreground(promptColor).Bold(true).Render("▸ ")
+	return style.Width(width).Render(prompt + RenderInputText(input, interactive, placeholder))
+}
+
+func RenderInputMessageBox(width int, style lipgloss.Style, content string) string {
+	return style.Width(width).Render(content)
+}
+
+func RenderScreen(chatPane string, warningArea string, inputPane string, extraPane string, statusBar string) string {
+	panes := []string{chatPane}
+	panes = append(panes, warningArea)
+	panes = append(panes, inputPane)
+	if extraPane != "" {
+		panes = append(panes, extraPane)
+	}
+	panes = append(panes, statusBar)
+	return strings.Join(panes, "\n")
+}
+
+func RenderStatusBar(width int, style lipgloss.Style, left string, middle string, hints string) string {
+	parts := []string{left}
+	if middle != "" {
+		parts = append(parts, middle)
+	}
+	if hints != "" {
+		parts = append(parts, hints)
 	}
 
-	theme := ThemeForMode(m.currentMode.ID)
-	prompt := lipgloss.NewStyle().Foreground(theme.Border).Bold(true).Render("▸ ")
-
-	return prompt + text
+	content := strings.Join(parts, " | ")
+	availableWidth := max(0, width-ChatPadding)
+	content = ansi.Truncate(content, availableWidth, "")
+	content = " " + content + " "
+	return style.Width(width).MaxHeight(1).Render(content)
 }
 
 func (m Model) renderModeSelector(width int, maxLines int) string {
@@ -187,8 +293,8 @@ func (m Model) renderModeSelector(width int, maxLines int) string {
 	matches := m.currentModeMatches()
 	var lines []string
 
-	title := "Select Mode"
-	hint := "↑↓ move · ⏎ switch · esc cancel"
+	title := text.SelectModeTitle
+	hint := text.SelectModeHint
 	titleLine := NeutralSelectorTitleStyle.Render(title) + "  " + NeutralHelpStyle.Render(hint)
 	lines = append(lines, titleLine)
 
@@ -208,8 +314,39 @@ func (m Model) renderModeSelector(width int, maxLines int) string {
 	}
 
 	if len(matches) == 0 {
-		lines = append(lines, m.styles.ErrorStyle.Render("No matching modes"))
+		lines = append(lines, m.styles.ErrorStyle.Render(text.NoMatchingModes))
 	}
+
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+
+	content := strings.Join(lines, "\n")
+	return m.styles.SelectorBoxStyle.Width(width).Render(content)
+}
+
+func hintsOverlayLines() []string {
+	return []string{
+		"/mode [prefix]  switch between Coach, Performance Review, Analysis",
+		"/modes          alias for /mode",
+		"/wrap           save current Analysis session and quit",
+		"/hints          show this help panel",
+		text.HintsClosePanel,
+		"⇧+drag          select and copy text in supported terminals",
+		text.HintsScrollConversation,
+		"^C              quit",
+	}
+}
+
+func (m Model) renderHintsOverlay(width int, maxLines int) string {
+	if !m.hintsOverlay.active || maxLines <= 2 {
+		return ""
+	}
+
+	lines := []string{
+		NeutralSelectorTitleStyle.Render(text.HintsTitle) + "  " + NeutralHelpStyle.Render(text.HintsCloseHint),
+	}
+	lines = append(lines, hintsOverlayLines()...)
 
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
@@ -247,11 +384,51 @@ func (m Model) renderStatusBar(width int) string {
 
 	percent := m.session.ContextUsagePercent()
 	contextInfo := m.renderContextUsage(percent)
+	hints := m.renderResponsiveStatusHints(width, modeName, contextInfo)
+	middle := contextInfo
+	if !statusBarFits(width, modeName, middle, hints) {
+		middle = ""
+		hints = m.renderResponsiveStatusHints(width, modeName, middle)
+	}
 
-	hints := NeutralHelpStyle.Render("⏎ send · esc cancel · / cmd · ^C quit")
+	return RenderStatusBar(width, m.styles.StatusBarStyle, modeName, middle, hints)
+}
 
-	content := strings.Join([]string{modeName, contextInfo, hints}, " | ")
-	return m.styles.StatusBarStyle.Width(width).Render(content)
+func (m Model) renderResponsiveStatusHints(width int, left string, middle string) string {
+	hintVariants := []string{
+		"⏎ send · /hints · ^C quit",
+		"/hints · ^C quit",
+		"/hints",
+		"^C quit",
+		"",
+	}
+
+	for _, raw := range hintVariants {
+		rendered := NeutralHelpStyle.Render(raw)
+		if statusBarFits(width, left, middle, rendered) {
+			return rendered
+		}
+	}
+
+	return ""
+}
+
+func statusBarFits(width int, left string, middle string, hints string) bool {
+	if width <= 0 {
+		return true
+	}
+
+	parts := []string{left}
+	if middle != "" {
+		parts = append(parts, middle)
+	}
+	if hints != "" {
+		parts = append(parts, hints)
+	}
+
+	content := strings.Join(parts, " | ")
+	availableWidth := max(0, width-ChatPadding)
+	return ansi.StringWidth(content) <= availableWidth
 }
 
 func (m Model) renderContextUsage(percent float64) string {
@@ -267,13 +444,17 @@ func (m Model) renderContextUsage(percent float64) string {
 		color = lipgloss.Color(ColorDanger)
 	}
 
-	label := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubdued)).Render("ctx ")
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubdued)).Render(text.ContextLabel)
 	value := lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%.0f%%", percent))
 	return label + value
 }
 
 func (m Model) renderThinkingSweep(frame int) string {
-	return RenderLoadingAnimation(frame, thinkingText, ThinkingColorBright, ThinkingColorMedium, ThinkingColorDim, ThinkingColorSubdued)
+	spinnerText := m.stream.spinnerText
+	if spinnerText == "" {
+		spinnerText = text.ThinkingText
+	}
+	return RenderLoadingAnimation(frame, spinnerText, ThinkingColorBright, ThinkingColorMedium, ThinkingColorDim, ThinkingColorSubdued)
 }
 
 func RenderLoadingAnimation(frame int, text string, highlightColor, mediumColor, dimColor, subduedColor string) string {
@@ -300,12 +481,6 @@ func RenderLoadingAnimation(frame int, text string, highlightColor, mediumColor,
 		}
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
 	}
-
-	// Add animated dots
-	dotsCount := (frame / 3) % 4
-	dots := strings.Repeat(".", dotsCount)
-	spaces := strings.Repeat(" ", 3-dotsCount)
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(subduedColor)).Render(dots + spaces))
 
 	return b.String()
 }

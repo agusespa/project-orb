@@ -7,10 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
+	"sync"
 	"syscall"
 
 	"project-orb/internal/agent"
+	"project-orb/internal/paths"
 	"project-orb/internal/setup"
 	"project-orb/internal/ui"
 
@@ -19,9 +20,31 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		logFatalError(err)
 		os.Exit(1)
 	}
+}
+
+var loggingConfigured bool
+
+func logFatalError(err error) {
+	if loggingConfigured {
+		slog.Error("Application exited with error", "error", err)
+		return
+	}
+
+	logPath, pathErr := getLogPath()
+	if pathErr != nil {
+		return
+	}
+
+	f, openErr := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if openErr != nil {
+		return
+	}
+	defer f.Close()
+
+	_, _ = fmt.Fprintf(f, "level=ERROR msg=%q error=%q\n", "Application exited with error", err.Error())
 }
 
 func run() error {
@@ -36,19 +59,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup wizard: %w", err)
 	}
-	defer shutdownManager(setupResult.Manager)
+	shutdown := onceShutdown(setupResult.Manager)
+	defer func() { _ = shutdown() }()
 
-	setupSignalHandler(ctx, cancel, setupResult.Manager)
+	cleanupSignals := setupSignalHandler(ctx, cancel, shutdown)
+	defer cleanupSignals()
 
 	slog.Info("Starting application...", "mode", setupResult.SelectedMode)
 
-	m, err := initialModel(setupResult)
+	m, err := initialModel(setupResult, shutdown)
 	if err != nil {
 		return fmt.Errorf("initialize model: %w", err)
 	}
 
 	p := newProgram(m, ctx)
-	if _, err := p.Run(); err != nil {
+	_, err = p.Run()
+	if err != nil {
 		return fmt.Errorf("run UI: %w", err)
 	}
 
@@ -58,18 +84,21 @@ func run() error {
 
 func newProgram(m ui.Model, ctx context.Context) *tea.Program {
 	m.SetShutdownCtx(ctx)
-	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	return tea.NewProgram(m, bubbleTeaProgramOptions(ctx)...)
 }
 
-func initialModel(setupResult *setup.Result) (ui.Model, error) {
+func bubbleTeaProgramOptions(ctx context.Context) []tea.ProgramOption {
+	return []tea.ProgramOption{
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithContext(ctx),
+	}
+}
+
+func initialModel(setupResult *setup.Result, shutdown func() error) (ui.Model, error) {
 	mode, found := agent.FindMode(setupResult.SelectedMode)
 	if !found {
 		return ui.Model{}, fmt.Errorf("mode not found: %q", setupResult.SelectedMode)
-	}
-
-	personaPath, err := agent.EnsurePersonaFile()
-	if err != nil {
-		return ui.Model{}, fmt.Errorf("ensure persona file: %w", err)
 	}
 
 	agentName, err := agent.LoadAgentName()
@@ -82,12 +111,41 @@ func initialModel(setupResult *setup.Result) (ui.Model, error) {
 		return ui.Model{}, fmt.Errorf("create client: %w", err)
 	}
 
-	return ui.NewModel(ui.ModelDependencies{
-		Client:      client,
-		CurrentMode: mode,
-		AgentName:   agentName,
-		PersonaPath: personaPath,
-	}), nil
+	sessionStore, err := agent.NewFileSessionStore()
+	if err != nil {
+		return ui.Model{}, fmt.Errorf("create session store: %w", err)
+	}
+
+	initialSession := agent.NewSessionContext()
+	statusMessage := ""
+	if mode.ID == agent.ModeAnalyst {
+		service, err := agent.NewService(client, mode)
+		if err != nil {
+			return ui.Model{}, fmt.Errorf("create initial analysis service: %w", err)
+		}
+		service.SetSessionStore(sessionStore)
+
+		session, _, err := service.LoadSession(context.Background())
+		if err != nil {
+			return ui.Model{}, fmt.Errorf("load saved analysis session: %w", err)
+		}
+		initialSession = session
+	}
+
+	model, err := ui.NewModel(ui.ModelDependencies{
+		Client:         client,
+		CurrentMode:    mode,
+		AgentName:      agentName,
+		InitialSession: initialSession,
+		SessionStore:   sessionStore,
+		StatusMessage:  statusMessage,
+		Shutdown:       shutdown,
+	})
+	if err != nil {
+		return ui.Model{}, fmt.Errorf("create ui model: %w", err)
+	}
+
+	return model, nil
 }
 
 func setupLogging() error {
@@ -105,6 +163,7 @@ func setupLogging() error {
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
+	loggingConfigured = true
 	return nil
 }
 
@@ -112,7 +171,7 @@ func runSetupWizard(ctx context.Context) (*setup.Result, error) {
 	slog.Info("Starting setup wizard")
 
 	sm := setup.NewModel(ctx)
-	p := tea.NewProgram(sm, tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(sm, bubbleTeaProgramOptions(ctx)...)
 
 	finalModel, err := p.Run()
 	if err != nil {
@@ -131,7 +190,7 @@ func runSetupWizard(ctx context.Context) (*setup.Result, error) {
 		if result.SelectedMode == "" {
 			// Setup was interrupted, clean up
 			slog.Info("Setup interrupted, cleaning up")
-			shutdownManager(result.Manager)
+			_ = shutdownManager(result.Manager)
 			return nil, fmt.Errorf("setup incomplete")
 		}
 	}
@@ -143,53 +202,74 @@ func runSetupWizard(ctx context.Context) (*setup.Result, error) {
 	return result, nil
 }
 
-func setupSignalHandler(ctx context.Context, cancel context.CancelFunc, manager interface{ Shutdown() error }) {
+func setupSignalHandler(ctx context.Context, cancel context.CancelFunc, shutdown func() error) func() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	cleanup := setupSignalHandlerWithChannel(ctx, cancel, shutdown, sigChan)
 
-	go func() {
-		<-sigChan
-		slog.Info("Shutdown signal received")
-		shutdownManager(manager)
-		cancel()
-	}()
+	return func() {
+		signal.Stop(sigChan)
+		cleanup()
+	}
 }
 
-func shutdownManager(manager interface{ Shutdown() error }) {
+func setupSignalHandlerWithChannel(ctx context.Context, cancel context.CancelFunc, shutdown func() error, sigChan <-chan os.Signal) func() {
+	done := make(chan struct{})
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-sigChan:
+			slog.Info("Shutdown signal received")
+			if shutdown != nil {
+				_ = shutdown()
+			}
+			cancel()
+		}
+	}()
+
+	return func() {
+		close(done)
+	}
+}
+
+func onceShutdown(manager interface{ Shutdown() error }) func() error {
+	var once sync.Once
+	var onceErr error
+
+	return func() error {
+		once.Do(func() {
+			onceErr = shutdownManager(manager)
+		})
+		return onceErr
+	}
+}
+
+func shutdownManager(manager interface{ Shutdown() error }) error {
 	if manager == nil {
-		return
+		return nil
 	}
 
 	slog.Info("Shutting down servers")
 	if err := manager.Shutdown(); err != nil {
 		slog.Error("Failed to shutdown servers", "error", err)
+		return err
 	}
+	return nil
 }
 
 func getLogPath() (string, error) {
-	logDir, err := resolveAppDataDir()
+	logPath, err := paths.DebugLogPath()
 	if err != nil {
 		return "", fmt.Errorf("resolve log directory: %w", err)
 	}
 
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return "", fmt.Errorf("create log directory %s: %w", logDir, err)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return "", fmt.Errorf("create log directory %s: %w", filepath.Dir(logPath), err)
 	}
 
-	return filepath.Join(logDir, "debug.log"), nil
-}
-
-func resolveAppDataDir() (string, error) {
-	const appName = "project-orb"
-
-	if xdgDataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdgDataHome != "" {
-		return filepath.Join(xdgDataHome, appName), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("determine home directory: %w", err)
-	}
-
-	return filepath.Join(homeDir, ".local", "share", appName), nil
+	return logPath, nil
 }

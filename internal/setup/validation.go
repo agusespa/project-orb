@@ -1,9 +1,11 @@
 package setup
 
 import (
-	"fmt"
+	"errors"
 	"strconv"
 	"strings"
+
+	"project-orb/internal/text"
 )
 
 func IsYes(input string) bool {
@@ -19,12 +21,12 @@ func IsYesOrNo(input string) bool {
 
 func ValidateModelSelection(input string, availableCount int) (int, error) {
 	if availableCount == 0 {
-		return 0, fmt.Errorf("no models available")
+		return 0, errors.New(text.NoModelsAvailable)
 	}
 
 	selection, err := strconv.Atoi(input)
 	if err != nil || selection < 1 || selection > availableCount {
-		return 0, fmt.Errorf("invalid selection. Please enter a number between 1 and %d", availableCount)
+		return 0, errors.New(text.InvalidModelSelection(availableCount))
 	}
 
 	return selection, nil
@@ -33,7 +35,7 @@ func ValidateModelSelection(input string, availableCount int) (int, error) {
 func ValidateModeSelection(input string) (int, error) {
 	selection, err := strconv.Atoi(input)
 	if err != nil || selection < 1 || selection > 3 {
-		return 0, fmt.Errorf("invalid selection. Please enter 1, 2, or 3")
+		return 0, errors.New(text.InvalidModeSelection)
 	}
 
 	return selection, nil

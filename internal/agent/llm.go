@@ -14,11 +14,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"project-orb/internal/paths"
+	"project-orb/internal/text"
 )
 
 const (
-	appName               = "project-orb"
-	personaFile           = "persona.md"
 	defaultCompletionsURL = "http://localhost:8080/v1/chat/completions"
 	defaultModelName      = "local-model"
 )
@@ -29,25 +30,55 @@ var embeddedInstructions string
 var personaNamePattern = regexp.MustCompile(`(?m)^Your name is (.+)\.$`)
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Stream   bool          `json:"stream"`
-	Messages []chatMessage `json:"messages"`
+	Model      string        `json:"model"`
+	Stream     bool          `json:"stream"`
+	Messages   []chatMessage `json:"messages"`
+	Tools      []chatTool    `json:"tools,omitempty"`
+	ToolChoice any           `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content,omitempty"`
+	Name       string         `json:"name,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 }
 
-type streamChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
+type chatTool struct {
+	Type     string           `json:"type"`
+	Function chatToolFunction `json:"function"`
+}
+
+type chatToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+type chatToolCall struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"`
+	Function chatToolCallFunction `json:"function"`
+}
+
+type chatToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type completionResponse struct {
+	Choices []completionChoice `json:"choices"`
+}
+
+type completionChoice struct {
+	Delta   chatMessage `json:"delta"`
+	Message chatMessage `json:"message"`
+}
+
+type ToolHandler struct {
+	Definition chatTool
+	Execute    func(context.Context, json.RawMessage) (string, error)
 }
 
 type ClientConfig struct {
@@ -115,7 +146,7 @@ func LoadAgentName() (string, error) {
 		return name, nil
 	}
 
-	return "Agent", nil
+	return text.DefaultAgentName, nil
 }
 
 func ExtractAgentName(persona string) string {
@@ -127,21 +158,20 @@ func ExtractAgentName(persona string) string {
 }
 
 func EnsurePersonaFile() (string, error) {
-	appConfigDir, err := resolveAppConfigDir()
+	personaPath, err := paths.PersonaFilePath()
 	if err != nil {
 		return "", err
 	}
 
-	if err := os.MkdirAll(appConfigDir, 0o755); err != nil {
-		return "", fmt.Errorf("create config dir %s: %w", appConfigDir, err)
+	if err := os.MkdirAll(filepath.Dir(personaPath), 0o755); err != nil {
+		return "", fmt.Errorf("create config dir %s: %w", filepath.Dir(personaPath), err)
 	}
 
-	personaPath := filepath.Join(appConfigDir, personaFile)
 	if _, err := os.Stat(personaPath); err == nil {
 		return personaPath, nil
 	}
 
-	defaultPersona := "# Persona\n\nYou are calm, thoughtful, and supportive.\n"
+	defaultPersona := fmt.Sprintf("# Persona\n\nYou are %s.\n", text.DefaultPersonality)
 	if err := os.WriteFile(personaPath, []byte(defaultPersona), 0o644); err != nil {
 		return "", fmt.Errorf("create default persona at %s: %w", personaPath, err)
 	}
@@ -149,58 +179,123 @@ func EnsurePersonaFile() (string, error) {
 	return personaPath, nil
 }
 
-func resolveAppConfigDir() (string, error) {
-	if xdgConfigHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdgConfigHome != "" {
-		return filepath.Join(xdgConfigHome, appName), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("determine home directory: %w", err)
-	}
-
-	return filepath.Join(homeDir, ".config", appName), nil
-}
-
 func (c *Client) Complete(ctx context.Context, messages []chatMessage) (string, error) {
-	payload := chatRequest{
+	message, err := c.completeMessage(ctx, chatRequest{
 		Model:    c.model,
 		Stream:   false,
 		Messages: messages,
+	})
+	if err != nil {
+		return "", err
 	}
 
+	return message.Content, nil
+}
+
+func (c *Client) CompleteWithTools(ctx context.Context, messages []chatMessage, handlers []ToolHandler) (chatMessage, error) {
+	if len(handlers) == 0 {
+		return c.completeMessage(ctx, chatRequest{
+			Model:    c.model,
+			Stream:   false,
+			Messages: messages,
+		})
+	}
+
+	tools := make([]chatTool, 0, len(handlers))
+	toolMap := make(map[string]ToolHandler, len(handlers))
+	for _, handler := range handlers {
+		tools = append(tools, handler.Definition)
+		toolMap[handler.Definition.Function.Name] = handler
+	}
+
+	conversation := append([]chatMessage(nil), messages...)
+	for i := 0; i < 6; i++ {
+		message, err := c.completeMessage(ctx, chatRequest{
+			Model:      c.model,
+			Stream:     false,
+			Messages:   conversation,
+			Tools:      tools,
+			ToolChoice: "auto",
+		})
+		if err != nil {
+			return chatMessage{}, err
+		}
+
+		if len(message.ToolCalls) == 0 {
+			return message, nil
+		}
+
+		conversation = append(conversation, message)
+		for _, call := range message.ToolCalls {
+			handler, ok := toolMap[call.Function.Name]
+			if !ok {
+				conversation = append(conversation, chatMessage{
+					Role:       "tool",
+					Name:       call.Function.Name,
+					ToolCallID: call.ID,
+					Content:    toolErrorJSON(fmt.Sprintf("unknown tool %q", call.Function.Name)),
+				})
+				continue
+			}
+
+			result, err := handler.Execute(ctx, json.RawMessage(call.Function.Arguments))
+			if err != nil {
+				result = toolErrorJSON(err.Error())
+			}
+
+			conversation = append(conversation, chatMessage{
+				Role:       "tool",
+				Name:       call.Function.Name,
+				ToolCallID: call.ID,
+				Content:    result,
+			})
+		}
+	}
+
+	return chatMessage{}, fmt.Errorf("tool calling exceeded maximum iterations")
+}
+
+func toolErrorJSON(message string) string {
+	data, _ := json.Marshal(map[string]any{
+		"ok":    false,
+		"error": message,
+	})
+	return string(data)
+}
+
+func (c *Client) completeMessage(ctx context.Context, payload chatRequest) (chatMessage, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return chatMessage{}, fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.completionsURL, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return chatMessage{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("send request: %w", err)
+		return chatMessage{}, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("llm server returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+		return chatMessage{}, fmt.Errorf("llm server returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 
-	var chunk streamChunk
-	if err := json.NewDecoder(resp.Body).Decode(&chunk); err != nil {
-		return "", fmt.Errorf("decode completion response: %w", err)
+	var response completionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return chatMessage{}, fmt.Errorf("decode completion response: %w", err)
 	}
 
-	if len(chunk.Choices) == 0 {
-		return "", fmt.Errorf("completion response contained no choices")
+	if len(response.Choices) == 0 {
+		return chatMessage{}, fmt.Errorf("completion response contained no choices")
 	}
 
-	return chunk.Choices[0].Message.Content, nil
+	return response.Choices[0].Message, nil
 }
 
 func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-chan string, <-chan error, error) {
@@ -262,7 +357,7 @@ func (c *Client) StreamMessages(ctx context.Context, messages []chatMessage) (<-
 				return
 			}
 
-			var chunk streamChunk
+			var chunk completionResponse
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				errCh <- fmt.Errorf("decode stream chunk: %w", err)
 				return

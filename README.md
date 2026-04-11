@@ -11,13 +11,17 @@ To use Project Orb, you need:
 
 ## Create Your Persona
 
-The first time you run Project Orb, it creates a starter `persona.md` for you automatically in your user config folder.
+The first time you run Project Orb, it creates a starter persona file for you automatically in your user config folder.
 
 You can edit that file any time to make the coach feel more like you want.
 
-Typical location:
+The app uses XDG-style config, data, and state directories on macOS and Linux.
 
-- macOS/Linux: `~/.config/project-orb/persona.md`
+That means:
+
+- config and persona live in the config directory
+- analysis sessions live in app data under the analysis sessions subtree
+- logs live in the state directory
 
 ## Start Your Local AI Server
 
