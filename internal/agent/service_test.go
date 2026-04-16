@@ -342,61 +342,6 @@ func TestStartupMessagesForPerformanceReviewUseWelcomeMessage(t *testing.T) {
 	}
 }
 
-type toolCallingRoundTripper struct{}
-
-func (toolCallingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	body, _ := io.ReadAll(req.Body)
-	var payload chatRequest
-	_ = json.Unmarshal(body, &payload)
-
-	var response completionResponse
-	hasToolResult := false
-	for _, message := range payload.Messages {
-		if message.Role == "tool" && message.Name == toolSearchMemories {
-			hasToolResult = true
-			break
-		}
-	}
-
-	switch {
-	case !hasToolResult:
-		response = completionResponse{
-			Choices: []completionChoice{
-				{
-					Message: chatMessage{
-						Role: "assistant",
-						ToolCalls: []chatToolCall{
-							{
-								ID:   "call-1",
-								Type: "function",
-								Function: chatToolCallFunction{
-									Name:      toolSearchMemories,
-									Arguments: `{"query":"have we talked about this before?","limit":1}`,
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-	default:
-		response = completionResponse{
-			Choices: []completionChoice{
-				{
-					Message: chatMessage{Role: "assistant", Content: "The user is asking whether this has come up before, and the memory search found a related prior session."},
-				},
-			},
-		}
-	}
-
-	jsonData, _ := json.Marshal(response)
-	return &http.Response{
-		StatusCode: 200,
-		Body:       io.NopCloser(bytes.NewReader(jsonData)),
-		Header:     make(http.Header),
-	}, nil
-}
-
 type analysisInspectingRoundTripper struct {
 	t                 *testing.T
 	requiredFragments []string
