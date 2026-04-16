@@ -12,19 +12,19 @@ import (
 )
 
 func TestRenderInputTextShowsPlaceholderOnlyWhenInteractive(t *testing.T) {
-	rendered := RenderInputText("", true, "Type your message and press Enter")
+	rendered := RenderInputText("", 0, true, "Type your message and press Enter")
 	if !strings.Contains(rendered, InputCursor+"Type your message and press Enter") {
 		t.Fatalf("expected placeholder with attached cursor, got %q", rendered)
 	}
 
-	rendered = RenderInputText("", false, "Type your message and press Enter")
+	rendered = RenderInputText("", 0, false, "Type your message and press Enter")
 	if rendered != "" {
 		t.Fatalf("expected no placeholder while disabled, got %q", rendered)
 	}
 }
 
 func TestRenderInputTextAppendsCursorWithoutExtraSpace(t *testing.T) {
-	rendered := RenderInputText("hello", true, "ignored")
+	rendered := RenderInputText("hello", 5, true, "ignored")
 	if !strings.Contains(rendered, "hello"+InputCursor) {
 		t.Fatalf("expected cursor attached to input, got %q", rendered)
 	}
@@ -33,8 +33,18 @@ func TestRenderInputTextAppendsCursorWithoutExtraSpace(t *testing.T) {
 	}
 }
 
+func TestRenderInputTextPlacesCursorAtCurrentPosition(t *testing.T) {
+	rendered := RenderInputText("hello", 2, true, "ignored")
+	if ansi.Strip(rendered) != "hello" {
+		t.Fatalf("expected block cursor to overlay existing text, got %q", ansi.Strip(rendered))
+	}
+	if strings.Contains(rendered, "he"+InputCursor+"llo") {
+		t.Fatalf("expected no inserted block in the middle of the text, got %q", rendered)
+	}
+}
+
 func TestRenderInputBoxIncludesPromptAndSharedContent(t *testing.T) {
-	rendered := RenderInputBox(40, lipgloss.NewStyle(), lipgloss.Color("7"), "", true, "Type your message and press Enter")
+	rendered := RenderInputBox(40, lipgloss.NewStyle(), lipgloss.Color("7"), "", 0, true, "Type your message and press Enter")
 	if !strings.Contains(rendered, "▸ ") {
 		t.Fatalf("expected prompt in input box, got %q", rendered)
 	}
@@ -107,7 +117,7 @@ func TestRenderStatusBarShowsHintsCommandWhenWide(t *testing.T) {
 	}
 }
 
-func TestRenderHintsOverlayShowsCommands(t *testing.T) {
+func TestRenderHintsOverlayHidesWrapInCoachMode(t *testing.T) {
 	model := Model{
 		currentMode:  agent.DefaultMode(),
 		session:      agent.NewSessionContext(),
@@ -119,8 +129,29 @@ func TestRenderHintsOverlayShowsCommands(t *testing.T) {
 	if !strings.Contains(rendered, "/hints") {
 		t.Fatalf("expected hints overlay to include /hints, got %q", rendered)
 	}
+	if strings.Contains(rendered, "/wrap") {
+		t.Fatalf("expected coach hints overlay to omit /wrap, got %q", rendered)
+	}
+}
+
+func TestRenderHintsOverlayShowsWrapInAnalysisMode(t *testing.T) {
+	model := Model{
+		currentMode:  agent.BuiltInModes()[2],
+		session:      agent.NewSessionContext(),
+		styles:       NewStyles(agent.ModeAnalysis),
+		hintsOverlay: hintsOverlay{active: true},
+		input:        "/wrap",
+	}
+
+	rendered := ansi.Strip(model.renderHintsOverlay(100, maxHintsOverlayLines))
 	if !strings.Contains(rendered, "/wrap") {
-		t.Fatalf("expected hints overlay to include /wrap, got %q", rendered)
+		t.Fatalf("expected analysis hints overlay to include /wrap, got %q", rendered)
+	}
+	if strings.Contains(rendered, "/hints") || strings.Contains(rendered, "/mode") {
+		t.Fatalf("expected wrap overlay to describe wrap only, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Save the current Analysis session summary and quit.") {
+		t.Fatalf("expected wrap overlay explanation, got %q", rendered)
 	}
 }
 
@@ -184,7 +215,7 @@ func TestRenderWarningAreaAlignsWithChatPanePadding(t *testing.T) {
 }
 
 func TestRenderWarningAreaWrapsLongMessageAcrossTwoLines(t *testing.T) {
-	message := "Unsaved Analysis session will be discarded. Use /wrap to save it, or press Ctrl+C again to quit without saving."
+	message := "Unsaved session will be discarded. Use /wrap to save it, or press Ctrl+C again to quit without saving."
 
 	rendered := ansi.Strip(RenderWarningArea(40, message))
 	lines := strings.Split(rendered, "\n")
@@ -209,13 +240,13 @@ func TestRenderWarningAreaWrapsLongMessageAcrossTwoLines(t *testing.T) {
 func TestRenderChatContentDoesNotDisplaySavedSummaryBlock(t *testing.T) {
 	model := Model{
 		currentMode: agent.Mode{
-			ID:           agent.ModeAnalyst,
-			Name:         "Analyst",
-			Description:  "Test analyst",
+			ID:           agent.ModeAnalysis,
+			Name:         "Analysis",
+			Description:  "Test analysis",
 			Instructions: "Test instructions",
 		},
 		agentName: "Claudio",
-		styles:    NewStyles(agent.ModeAnalyst),
+		styles:    NewStyles(agent.ModeAnalysis),
 		session: agent.SessionContext{
 			Summary: "## Overview\nThis should stay internal.",
 		},

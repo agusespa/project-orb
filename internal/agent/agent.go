@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	maxRecentWords = 3000 // Recent history before compaction
-	minRecentTurns = 3    // Always keep at least this many turns
-	maxTotalWords  = 6000 // Total context limit (recent + summary) for UI indicator
+	maxWorkingHistoryWords = 3000 // Recent history before compaction
+	minWorkingHistoryTurns = 3    // Always keep at least this many turns
+	maxTotalWords          = 6000 // Total context limit (recent + summary) for UI indicator
 )
 
 //go:embed prompts/analysis_task.md
@@ -32,10 +32,11 @@ type Turn struct {
 }
 
 type SessionContext struct {
-	SessionID string
-	StartedAt time.Time
-	Summary   string
-	Recent    []Turn
+	SessionID      string
+	StartedAt      time.Time
+	Summary        string
+	WorkingHistory []Turn
+	RawHistory     []Turn
 }
 
 type MemorySnippet struct {
@@ -43,6 +44,11 @@ type MemorySnippet struct {
 	Summary   string
 	Excerpt   string
 	Score     int
+}
+
+type MemoryTranscript struct {
+	SessionID  string
+	Transcript string
 }
 
 func NewSessionContext() SessionContext {
@@ -67,12 +73,13 @@ func (s *SessionContext) AddTurn(turn Turn) {
 	if turn.CreatedAt.IsZero() {
 		turn.CreatedAt = time.Now().UTC()
 	}
-	s.Recent = append(s.Recent, turn)
+	s.WorkingHistory = append(s.WorkingHistory, turn)
+	s.RawHistory = append(s.RawHistory, turn)
 }
 
 func (s *SessionContext) WordCount() int {
 	count := 0
-	for _, turn := range s.Recent {
+	for _, turn := range s.WorkingHistory {
 		count += countWords(turn.User)
 		count += countWords(turn.Assistant)
 	}
@@ -121,7 +128,7 @@ func buildConversationMessages(systemMessage string, session SessionContext, mem
 		})
 	}
 
-	for _, turn := range session.Recent {
+	for _, turn := range session.WorkingHistory {
 		if user := strings.TrimSpace(turn.User); user != "" {
 			messages = append(messages, chatMessage{Role: "user", Content: user})
 		}
@@ -163,8 +170,8 @@ func buildMemoryContext(memories []MemorySnippet) string {
 	return strings.TrimSpace(b.String())
 }
 
-func updateConversationSummary(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
-	if len(turns) == 0 {
+func processSummaryWithPrompt(ctx context.Context, client *Client, existingSummary string, turns []Turn, prompt string) (string, error) {
+	if len(turns) == 0 && strings.TrimSpace(existingSummary) == "" {
 		return existingSummary, nil
 	}
 
@@ -186,12 +193,20 @@ func updateConversationSummary(ctx context.Context, client *Client, existingSumm
 		}
 	}
 
-	messages = append(messages, chatMessage{Role: "user", Content: summaryTaskPrompt})
+	messages = append(messages, chatMessage{Role: "user", Content: prompt})
 
 	summary, err := client.Complete(ctx, messages)
 	if err != nil {
-		return "", fmt.Errorf("update conversation summary: %w", err)
+		return "", fmt.Errorf("process summary: %w", err)
 	}
 
 	return strings.TrimSpace(summary), nil
+}
+
+func CompactContext(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	return processSummaryWithPrompt(ctx, client, existingSummary, turns, summaryTaskPrompt)
+}
+
+func EvaluatePerformanceReview(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	return processSummaryWithPrompt(ctx, client, existingSummary, turns, performanceReviewSummaryTaskPrompt)
 }

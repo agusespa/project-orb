@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"strings"
@@ -14,8 +15,10 @@ const (
 	ModeSetup             ModeID = "setup"
 	ModeCoach             ModeID = "coach"
 	ModePerformanceReview ModeID = "performance-review"
-	ModeAnalyst           ModeID = "analyst"
+	ModeAnalysis          ModeID = "analysis"
 )
+
+type SessionFinalizer func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error)
 
 type Mode struct {
 	ID           ModeID
@@ -24,6 +27,7 @@ type Mode struct {
 	Instructions string
 	ToolNames    []string
 	Selectable   bool
+	Finalizer    SessionFinalizer
 }
 
 //go:embed prompts/coach_instructions.md
@@ -34,6 +38,9 @@ var performanceReviewInstructions string
 
 //go:embed prompts/analysis_instructions.md
 var analysisInstructions string
+
+//go:embed prompts/performance_review_summary_task.md
+var performanceReviewSummaryTaskPrompt string
 
 func AllModes() []Mode {
 	return []Mode{
@@ -58,17 +65,21 @@ func AllModes() []Mode {
 			Instructions: performanceReviewInstructions,
 			ToolNames:    nil,
 			Selectable:   true,
+			Finalizer:    EvaluatePerformanceReview,
 		},
 		{
-			ID:           ModeAnalyst,
-			Name:         text.ModeAnalystName,
-			Description:  text.ModeAnalystDescription,
+			ID:           ModeAnalysis,
+			Name:         text.ModeAnalysisName,
+			Description:  text.ModeAnalysisDescription,
 			Instructions: analysisInstructions,
 			ToolNames: []string{
 				toolSearchMemories,
+				toolSearchMemoryTranscripts,
 				toolLoadMemoryExcerpt,
+				toolLoadMemoryTranscript,
 			},
 			Selectable: true,
+			Finalizer:  CompactContext,
 		},
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ type SessionStore interface {
 	LoadLatestSummary(mode ModeID) (SessionContext, bool, error)
 	SaveSession(ctx context.Context, mode ModeID, session SessionContext) error
 	SearchRelevantSummaries(mode ModeID, query string, excludeSummary string, limit int) ([]MemorySnippet, error)
+	SearchTranscriptExcerpts(mode ModeID, query string, limit int, maxTurns int) ([]MemorySnippet, error)
+	LoadTranscript(mode ModeID, sessionID string) (MemoryTranscript, error)
 	LoadTranscriptExcerpt(mode ModeID, sessionID string, query string, maxTurns int) (string, error)
 }
 
@@ -26,6 +29,8 @@ type FileSessionStore struct {
 	sessionsDir string
 	embedder    embedder
 }
+
+const performanceReviewSnapshotLimit = 4
 
 func NewFileSessionStore() (*FileSessionStore, error) {
 	sessionsDir, err := paths.AnalysisSessionsPath()
@@ -41,6 +46,13 @@ func NewFileSessionStore() (*FileSessionStore, error) {
 
 func (s *FileSessionStore) LoadLatestSummary(mode ModeID) (SessionContext, bool, error) {
 	dir := s.modeDir(mode)
+	if mode == ModePerformanceReview {
+		session, found, err := s.loadPerformanceReviewSummary(dir)
+		if err != nil || found {
+			return session, found, err
+		}
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -79,13 +91,20 @@ func (s *FileSessionStore) LoadLatestSummary(mode ModeID) (SessionContext, bool,
 func (s *FileSessionStore) SaveSession(ctx context.Context, mode ModeID, session SessionContext) error {
 	session.EnsureMetadata()
 
-	if len(session.Recent) == 0 {
+	if len(session.RawHistory) == 0 {
 		return nil
 	}
 
 	dir := s.modeDir(mode)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
+	}
+
+	if mode == ModePerformanceReview {
+		if err := s.savePerformanceReviewSession(dir, mode, session); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	sessionPath := filepath.Join(dir, session.SessionID+"-session.md")
@@ -177,6 +196,62 @@ func (s *FileSessionStore) SearchRelevantSummaries(mode ModeID, query string, ex
 	return snippets, nil
 }
 
+func (s *FileSessionStore) SearchTranscriptExcerpts(mode ModeID, query string, limit int, maxTurns int) ([]MemorySnippet, error) {
+	if limit <= 0 || maxTurns <= 0 || strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+
+	dir := s.modeDir(mode)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read session dir: %w", err)
+	}
+
+	var snippets []MemorySnippet
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, "-session.md") {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read session transcript: %w", err)
+		}
+
+		turns := extractTranscriptTurns(string(data))
+		best, score := bestMatchingTurns(turns, query, maxTurns)
+		if score <= 0 || len(best) == 0 {
+			continue
+		}
+
+		snippets = append(snippets, MemorySnippet{
+			SessionID: strings.TrimSuffix(name, "-session.md"),
+			Excerpt:   renderTurns(best),
+			Score:     score,
+		})
+	}
+
+	sort.SliceStable(snippets, func(i, j int) bool {
+		if snippets[i].Score == snippets[j].Score {
+			return snippets[i].SessionID > snippets[j].SessionID
+		}
+		return snippets[i].Score > snippets[j].Score
+	})
+
+	if len(snippets) > limit {
+		snippets = snippets[:limit]
+	}
+
+	return snippets, nil
+}
+
 func (s *FileSessionStore) saveEmbeddingBestEffort(ctx context.Context, path string, summary string) {
 	if s.embedder == nil || strings.TrimSpace(summary) == "" {
 		return
@@ -195,18 +270,82 @@ func (s *FileSessionStore) saveEmbeddingBestEffort(ctx context.Context, path str
 	_ = os.WriteFile(path, data, 0o644)
 }
 
+func (s *FileSessionStore) loadPerformanceReviewSummary(dir string) (SessionContext, bool, error) {
+	currentPath := filepath.Join(dir, "current.md")
+	data, err := os.ReadFile(currentPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewSessionContext(), false, nil
+		}
+		return SessionContext{}, false, fmt.Errorf("read performance review summary: %w", err)
+	}
+
+	session := NewSessionContext()
+	session.Summary = extractSummaryBody(string(data))
+	return session, strings.TrimSpace(session.Summary) != "", nil
+}
+
+func (s *FileSessionStore) savePerformanceReviewSession(dir string, mode ModeID, session SessionContext) error {
+	currentPath := filepath.Join(dir, "current.md")
+	snapshotPath := filepath.Join(dir, session.SessionID+"-summary.md")
+
+	content := renderSummaryMarkdown(mode, session)
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write current performance review summary: %w", err)
+	}
+	if err := os.WriteFile(snapshotPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write performance review snapshot: %w", err)
+	}
+	if err := s.prunePerformanceReviewSnapshots(dir, performanceReviewSnapshotLimit); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *FileSessionStore) prunePerformanceReviewSnapshots(dir string, keep int) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read performance review dir: %w", err)
+	}
+
+	var snapshots []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isPerformanceReviewSnapshotFile(name) {
+			continue
+		}
+		snapshots = append(snapshots, name)
+	}
+
+	sort.Strings(snapshots)
+	if len(snapshots) <= keep {
+		return nil
+	}
+
+	for _, name := range snapshots[:len(snapshots)-keep] {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("remove old performance review snapshot: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (s *FileSessionStore) LoadTranscriptExcerpt(mode ModeID, sessionID string, query string, maxTurns int) (string, error) {
 	if maxTurns <= 0 || strings.TrimSpace(sessionID) == "" {
 		return "", nil
 	}
 
-	path := filepath.Join(s.modeDir(mode), sessionID+"-session.md")
-	data, err := os.ReadFile(path)
+	data, err := s.readTranscriptFile(mode, sessionID)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("read session transcript: %w", err)
+		return "", err
+	}
+	if len(data) == 0 {
+		return "", nil
 	}
 
 	turns := extractTranscriptTurns(string(data))
@@ -219,23 +358,22 @@ func (s *FileSessionStore) LoadTranscriptExcerpt(mode ModeID, sessionID string, 
 		return "", nil
 	}
 
-	var b strings.Builder
-	for i, turn := range best {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		if user := strings.TrimSpace(turn.User); user != "" {
-			b.WriteString(text.SessionUserPrefix)
-			b.WriteString(user)
-			b.WriteString("\n")
-		}
-		if assistant := strings.TrimSpace(turn.Assistant); assistant != "" {
-			b.WriteString(text.SessionAssistantPrefix)
-			b.WriteString(assistant)
-		}
+	return renderTurns(best), nil
+}
+
+func (s *FileSessionStore) LoadTranscript(mode ModeID, sessionID string) (MemoryTranscript, error) {
+	resolvedID, data, err := s.loadTranscriptData(mode, sessionID)
+	if err != nil {
+		return MemoryTranscript{}, err
+	}
+	if resolvedID == "" || len(data) == 0 {
+		return MemoryTranscript{}, nil
 	}
 
-	return strings.TrimSpace(b.String()), nil
+	return MemoryTranscript{
+		SessionID:  resolvedID,
+		Transcript: strings.TrimSpace(string(data)),
+	}, nil
 }
 
 func (s *FileSessionStore) semanticScore(queryVector []float64, embeddingPath string) (int, bool) {
@@ -257,8 +395,80 @@ func (s *FileSessionStore) semanticScore(queryVector []float64, embeddingPath st
 	return int(math.Round(score * 10)), true
 }
 
+func (s *FileSessionStore) loadTranscriptData(mode ModeID, sessionID string) (string, []byte, error) {
+	path, resolvedID, found, err := s.resolveTranscriptPath(mode, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	if !found {
+		return "", nil, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, nil
+		}
+		return "", nil, fmt.Errorf("read session transcript: %w", err)
+	}
+
+	return resolvedID, data, nil
+}
+
+func (s *FileSessionStore) readTranscriptFile(mode ModeID, sessionID string) ([]byte, error) {
+	_, data, err := s.loadTranscriptData(mode, sessionID)
+	return data, err
+}
+
+func (s *FileSessionStore) resolveTranscriptPath(mode ModeID, sessionID string) (path string, resolvedID string, found bool, err error) {
+	dir := s.modeDir(mode)
+	if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+		path := filepath.Join(dir, trimmed+"-session.md")
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return "", "", false, nil
+			}
+			return "", "", false, fmt.Errorf("stat session transcript: %w", err)
+		}
+		return path, trimmed, true, nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("read session dir: %w", err)
+	}
+
+	var sessionFiles []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, "-session.md") {
+			sessionFiles = append(sessionFiles, name)
+		}
+	}
+
+	if len(sessionFiles) == 0 {
+		return "", "", false, nil
+	}
+
+	sort.Strings(sessionFiles)
+	latest := sessionFiles[len(sessionFiles)-1]
+	return filepath.Join(dir, latest), strings.TrimSuffix(latest, "-session.md"), true, nil
+}
+
 func (s *FileSessionStore) modeDir(mode ModeID) string {
 	return filepath.Join(s.sessionsDir, string(mode))
+}
+
+var performanceReviewSnapshotPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-\d{6}-summary\.md$`)
+
+func isPerformanceReviewSnapshotFile(name string) bool {
+	return performanceReviewSnapshotPattern.MatchString(name)
 }
 
 func renderSessionMarkdown(mode ModeID, session SessionContext) string {
@@ -283,12 +493,12 @@ func renderSessionMarkdown(mode ModeID, session SessionContext) string {
 		b.WriteString("(none)\n")
 	}
 	b.WriteString("\n## Conversation\n")
-	if len(session.Recent) == 0 {
+	if len(session.RawHistory) == 0 {
 		b.WriteString("(no completed turns)\n")
 		return b.String()
 	}
 
-	for _, turn := range session.Recent {
+	for _, turn := range session.RawHistory {
 		turnTime := ""
 		if !turn.CreatedAt.IsZero() {
 			turnTime = " (" + turn.CreatedAt.Format(time.RFC3339) + ")"
@@ -402,6 +612,23 @@ func pickRelevantTurns(turns []Turn, query string, maxTurns int) []Turn {
 		return turns[len(turns)-maxTurns:]
 	}
 
+	best, score := bestMatchingTurns(turns, query, maxTurns)
+	if score == 0 || len(best) == 0 {
+		if len(turns) <= maxTurns {
+			return turns
+		}
+		return turns[len(turns)-maxTurns:]
+	}
+
+	return best
+}
+
+func bestMatchingTurns(turns []Turn, query string, maxTurns int) ([]Turn, int) {
+	queryTerms := normalizedTerms(query)
+	if len(queryTerms) == 0 || len(turns) == 0 || maxTurns <= 0 {
+		return nil, 0
+	}
+
 	bestStart := -1
 	bestScore := 0
 	for i := range turns {
@@ -411,8 +638,10 @@ func pickRelevantTurns(turns []Turn, query string, maxTurns int) []Turn {
 		}
 		score := 0
 		for _, turn := range turns[i:end] {
+			user := normalizeForMatching(turn.User)
+			assistant := normalizeForMatching(turn.Assistant)
 			for _, term := range queryTerms {
-				if strings.Contains(normalizeForMatching(turn.User), term) || strings.Contains(normalizeForMatching(turn.Assistant), term) {
+				if strings.Contains(user, term) || strings.Contains(assistant, term) {
 					score++
 				}
 			}
@@ -424,17 +653,34 @@ func pickRelevantTurns(turns []Turn, query string, maxTurns int) []Turn {
 	}
 
 	if bestStart == -1 || bestScore == 0 {
-		if len(turns) <= maxTurns {
-			return turns
-		}
-		return turns[len(turns)-maxTurns:]
+		return nil, 0
 	}
 
 	end := bestStart + maxTurns
 	if end > len(turns) {
 		end = len(turns)
 	}
-	return turns[bestStart:end]
+	return turns[bestStart:end], bestScore
+}
+
+func renderTurns(turns []Turn) string {
+	var b strings.Builder
+	for i, turn := range turns {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		if user := strings.TrimSpace(turn.User); user != "" {
+			b.WriteString(text.SessionUserPrefix)
+			b.WriteString(user)
+			b.WriteString("\n")
+		}
+		if assistant := strings.TrimSpace(turn.Assistant); assistant != "" {
+			b.WriteString(text.SessionAssistantPrefix)
+			b.WriteString(assistant)
+		}
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 func normalizedTerms(text string) []string {

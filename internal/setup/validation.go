@@ -42,7 +42,7 @@ func ValidateModeSelection(input string) (int, error) {
 }
 
 func ModeIDFromSelection(selection int) string {
-	modes := []string{"coach", "performance-review", "analyst"}
+	modes := []string{"coach", "performance-review", "analysis"}
 	if selection < 1 || selection > len(modes) {
 		return "coach"
 	}

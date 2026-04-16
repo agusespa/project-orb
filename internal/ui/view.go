@@ -110,7 +110,7 @@ func (m Model) View() string {
 		hintsOverlay = m.renderHintsOverlay(m.width, maxHintsOverlayLines)
 	}
 
-	inputPane := RenderInputBox(m.width, m.styles.InputBox, ThemeForMode(m.currentMode.ID).Border, m.input, !m.stream.active && !m.loadingAnalystMessage, text.TypeYourMessagePrompt)
+	inputPane := RenderInputBox(m.width, m.styles.InputBox, ThemeForMode(m.currentMode.ID).Border, m.input, m.clampedInputCursor(), !m.stream.active && !m.loadingAnalysisMessage, text.TypeYourMessagePrompt)
 	extraPane := modeSelector
 	if hintsOverlay != "" {
 		extraPane = hintsOverlay
@@ -129,9 +129,9 @@ func (m Model) renderChatContent(width int) string {
 		}
 
 		body := message
-		// If loading analyst message and this is the last startup message, append loading animation
-		if m.loadingAnalystMessage && i == len(m.startupMessages)-1 {
-			loadingText := RenderLoadingAnimation(m.analystLoadingFrame, text.LoadingMemoryText, ThinkingColorBright, ThinkingColorMedium, ThinkingColorDim, ThinkingColorSubdued)
+		// If loading analysis message and this is the last startup message, append loading animation
+		if m.loadingAnalysisMessage && i == len(m.startupMessages)-1 {
+			loadingText := RenderLoadingAnimation(m.analysisLoadingFrame, text.LoadingMemoryText, ThinkingColorBright, ThinkingColorMedium, ThinkingColorDim, ThinkingColorSubdued)
 			body = strings.TrimRight(body, "\n")
 			if strings.TrimSpace(body) != "" {
 				body += "\n\n" + loadingText
@@ -143,7 +143,7 @@ func (m Model) renderChatContent(width int) string {
 		blocks = append(blocks, RenderAgentBlock(width, m.styles.CoachNameStyle, m.styles.CoachBodyStyle, m.agentName, body))
 	}
 
-	for _, turn := range m.session.Recent {
+	for _, turn := range m.session.WorkingHistory {
 		if strings.TrimSpace(turn.User) == "" && strings.TrimSpace(turn.Assistant) == "" {
 			continue
 		}
@@ -223,7 +223,7 @@ func RenderWarningArea(width int, statusMessage string) string {
 	return warningStyle.Render(strings.Join(lines, "\n"))
 }
 
-func RenderInputText(input string, interactive bool, placeholder string) string {
+func RenderInputText(input string, cursor int, interactive bool, placeholder string) string {
 	switch {
 	case interactive && input == "":
 		return lipgloss.NewStyle().
@@ -231,7 +231,16 @@ func RenderInputText(input string, interactive bool, placeholder string) string 
 			Italic(true).
 			Render(InputCursor + placeholder)
 	case interactive:
-		return input + InputCursor
+		runes := []rune(input)
+		cursor = max(0, min(cursor, len(runes)))
+		if cursor == len(runes) {
+			return input + InputCursor
+		}
+
+		cursorRune := lipgloss.NewStyle().
+			Reverse(true).
+			Render(string(runes[cursor]))
+		return string(runes[:cursor]) + cursorRune + string(runes[cursor+1:])
 	default:
 		return input
 	}
@@ -249,9 +258,9 @@ func RenderChatPane(width int, height int, content string) string {
 		Render(content)
 }
 
-func RenderInputBox(width int, style lipgloss.Style, promptColor lipgloss.Color, input string, interactive bool, placeholder string) string {
+func RenderInputBox(width int, style lipgloss.Style, promptColor lipgloss.Color, input string, cursor int, interactive bool, placeholder string) string {
 	prompt := lipgloss.NewStyle().Foreground(promptColor).Bold(true).Render("▸ ")
-	return style.Width(width).Render(prompt + RenderInputText(input, interactive, placeholder))
+	return style.Width(width).Render(prompt + RenderInputText(input, cursor, interactive, placeholder))
 }
 
 func RenderInputMessageBox(width int, style lipgloss.Style, content string) string {
@@ -325,17 +334,20 @@ func (m Model) renderModeSelector(width int, maxLines int) string {
 	return m.styles.SelectorBoxStyle.Width(width).Render(content)
 }
 
-func hintsOverlayLines() []string {
-	return []string{
+func hintsOverlayLines(modeID agent.ModeID) []string {
+	lines := []string{
 		"/mode [prefix]  switch between Coach, Performance Review, Analysis",
 		"/modes          alias for /mode",
-		"/wrap           save current Analysis session and quit",
 		"/hints          show this help panel",
 		text.HintsClosePanel,
 		"⇧+drag          select and copy text in supported terminals",
 		text.HintsScrollConversation,
 		"^C              quit",
 	}
+	if modeID == agent.ModeAnalysis || modeID == agent.ModePerformanceReview {
+		lines = append(lines[:2], append([]string{"/wrap           save current session and quit"}, lines[2:]...)...)
+	}
+	return lines
 }
 
 func (m Model) renderHintsOverlay(width int, maxLines int) string {
@@ -346,7 +358,11 @@ func (m Model) renderHintsOverlay(width int, maxLines int) string {
 	lines := []string{
 		NeutralSelectorTitleStyle.Render(text.HintsTitle) + "  " + NeutralHelpStyle.Render(text.HintsCloseHint),
 	}
-	lines = append(lines, hintsOverlayLines()...)
+	if m.isWrapCommandInput() {
+		lines = append(lines, wrapOverlayLines(m.currentMode.Name)...)
+	} else {
+		lines = append(lines, hintsOverlayLines(m.currentMode.ID)...)
+	}
 
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
@@ -354,6 +370,14 @@ func (m Model) renderHintsOverlay(width int, maxLines int) string {
 
 	content := strings.Join(lines, "\n")
 	return m.styles.SelectorBoxStyle.Width(width).Render(content)
+}
+
+func wrapOverlayLines(modeName string) []string {
+	return []string{
+		"/wrap",
+		"Save the current " + modeName + " session summary and quit.",
+		"text will be finalized, written to disk, and then the app will close",
+	}
 }
 
 func (m Model) getModeNameStyle(modeID agent.ModeID, index int) lipgloss.Style {

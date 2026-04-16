@@ -17,7 +17,7 @@ func NoMatchingMode(query string) string {
 
 // UnsavedSessionSwitchWarning warns about discarding an unsaved session when switching modes
 func UnsavedSessionSwitchWarning(targetModeName string) string {
-	return fmt.Sprintf("Unsaved Analysis session will be discarded if you switch to %s. Use /wrap to save it, or switch to %s again to discard it.", targetModeName, targetModeName)
+	return fmt.Sprintf("Unsaved session will be discarded if you switch to %s. Use /wrap to save it, or switch to %s again to discard it.", targetModeName, targetModeName)
 }
 
 // UnknownCommand returns an error message for an unknown command
@@ -47,7 +47,7 @@ func PersonaToneLine(tone string) string {
 
 // AnalysisContext wraps the current analysis for the response prompt.
 func AnalysisContext(analysis string) string {
-	return "Analysis:\n" + strings.TrimSpace(analysis)
+	return "Analysis (treat these notes as established context; if they say a prior transcript or memory was loaded, do not claim you lack access to prior sessions):\n" + strings.TrimSpace(analysis)
 }
 
 // ConversationSummary wraps an existing conversation summary for the summary task.
@@ -86,7 +86,7 @@ func StartupGuidanceRoleMapping(agentName string) string {
 
 // SessionWrapped returns a message indicating the session was wrapped and saved
 func SessionWrapped(modeName string) string {
-	return fmt.Sprintf("Wrapped and saved the %s session. Quitting...", modeName)
+	return fmt.Sprintf("Wrapping and saving the %s session...", modeName)
 }
 
 // AskForModelsDir prompts the user for the models directory path

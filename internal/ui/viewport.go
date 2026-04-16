@@ -43,6 +43,11 @@ func (v *ChatViewport) Update(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 
+	if mouseMsg, ok := msg.(tea.MouseMsg); ok && tea.MouseEvent(mouseMsg).IsWheel() && mouseMsg.Action != tea.MouseActionPress {
+		mouseMsg.Action = tea.MouseActionPress
+		msg = mouseMsg
+	}
+
 	var cmd tea.Cmd
 	v.model, cmd = v.model.Update(msg)
 	return cmd

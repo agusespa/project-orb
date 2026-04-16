@@ -815,7 +815,7 @@ func (m Model) View() string {
 		inputText := lipgloss.NewStyle().Foreground(lipgloss.Color(ui.ColorSubdued)).Italic(true).Render(text.PressCtrlCToExit)
 		inputPane = ui.RenderInputMessageBox(m.width, m.styles.InputBox, inputText)
 	} else {
-		inputPane = ui.RenderInputBox(m.width, m.styles.InputBox, ui.ThemeForMode(agent.ModeSetup).Border, m.input, m.acceptsInput(), text.TypeYourResponsePrompt)
+		inputPane = ui.RenderInputBox(m.width, m.styles.InputBox, ui.ThemeForMode(agent.ModeSetup).Border, m.input, len([]rune(m.input)), m.acceptsInput(), text.TypeYourResponsePrompt)
 	}
 
 	var extraPane string

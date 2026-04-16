@@ -39,6 +39,10 @@ func (tr *e2eLLMTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	switch tr.scenario {
 	case "memory-recall":
 		return tr.memoryRecallResponse(payload), nil
+	case "raw-transcript-search":
+		return tr.rawTranscriptSearchResponse(payload), nil
+	case "raw-latest-transcript":
+		return tr.rawLatestTranscriptResponse(payload), nil
 	case "no-tool":
 		return tr.noToolResponse(payload), nil
 	case "no-memory-hit":
@@ -58,8 +62,8 @@ func (tr *e2eLLMTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 func (tr *e2eLLMTransport) memoryRecallResponse(payload chatRequest) *http.Response {
 	switch len(tr.requests) {
 	case 1:
-		if len(payload.Tools) != 2 {
-			tr.t.Fatalf("expected 2 analysis tools, got %d", len(payload.Tools))
+		if len(payload.Tools) != 4 {
+			tr.t.Fatalf("expected 4 analysis tools, got %d", len(payload.Tools))
 		}
 		return tr.jsonResponse(completionResponse{
 			Choices: []completionChoice{{
@@ -116,10 +120,92 @@ func (tr *e2eLLMTransport) memoryRecallResponse(payload chatRequest) *http.Respo
 	}
 }
 
+func (tr *e2eLLMTransport) rawTranscriptSearchResponse(payload chatRequest) *http.Response {
+	switch len(tr.requests) {
+	case 1:
+		if len(payload.Tools) != 4 {
+			tr.t.Fatalf("expected 4 analysis tools, got %d", len(payload.Tools))
+		}
+		return tr.jsonResponse(completionResponse{
+			Choices: []completionChoice{{
+				Message: chatMessage{
+					Role: "assistant",
+					ToolCalls: []chatToolCall{{
+						ID:   "call-search-transcripts",
+						Type: "function",
+						Function: chatToolCallFunction{
+							Name:      toolSearchMemoryTranscripts,
+							Arguments: `{"query":"stop-doing list","limit":1,"max_turns":1}`,
+						},
+					}},
+				},
+			}},
+		})
+	case 2:
+		last := payload.Messages[len(payload.Messages)-1]
+		if last.Role != "tool" || last.Name != toolSearchMemoryTranscripts {
+			tr.t.Fatalf("expected search_memory_transcripts tool result in second request, got %#v", last)
+		}
+		tr.streamText = "Yes. We did discuss a stop-doing list before, and I found it in a saved transcript rather than only in the summary."
+		return tr.jsonResponse(completionResponse{
+			Choices: []completionChoice{{
+				Message: chatMessage{
+					Role:    "assistant",
+					Content: "The user is challenging the provenance of a remembered idea. I searched raw transcripts and found a matching excerpt mentioning a stop-doing list.",
+				},
+			}},
+		})
+	default:
+		tr.t.Fatalf("unexpected request count for raw transcript search scenario: %d", len(tr.requests))
+		return nil
+	}
+}
+
+func (tr *e2eLLMTransport) rawLatestTranscriptResponse(payload chatRequest) *http.Response {
+	switch len(tr.requests) {
+	case 1:
+		if len(payload.Tools) != 4 {
+			tr.t.Fatalf("expected 4 analysis tools, got %d", len(payload.Tools))
+		}
+		return tr.jsonResponse(completionResponse{
+			Choices: []completionChoice{{
+				Message: chatMessage{
+					Role: "assistant",
+					ToolCalls: []chatToolCall{{
+						ID:   "call-transcript",
+						Type: "function",
+						Function: chatToolCallFunction{
+							Name:      toolLoadMemoryTranscript,
+							Arguments: `{}`,
+						},
+					}},
+				},
+			}},
+		})
+	case 2:
+		last := payload.Messages[len(payload.Messages)-1]
+		if last.Role != "tool" || last.Name != toolLoadMemoryTranscript {
+			tr.t.Fatalf("expected load_memory_transcript tool result in second request, got %#v", last)
+		}
+		tr.streamText = "The latest saved session included: \"I want the raw text from last time.\""
+		return tr.jsonResponse(completionResponse{
+			Choices: []completionChoice{{
+				Message: chatMessage{
+					Role:    "assistant",
+					Content: "The user asked for exact prior wording. I loaded the latest saved transcript and can quote from it directly.",
+				},
+			}},
+		})
+	default:
+		tr.t.Fatalf("unexpected request count for raw latest transcript scenario: %d", len(tr.requests))
+		return nil
+	}
+}
+
 func (tr *e2eLLMTransport) noToolResponse(payload chatRequest) *http.Response {
 	switch len(tr.requests) {
 	case 1:
-		if len(payload.Tools) != 2 {
+		if len(payload.Tools) != 4 {
 			tr.t.Fatalf("expected analysis tools to be available in analysis mode, got %d", len(payload.Tools))
 		}
 		tr.streamText = "Let's stay with what feels heavy about it right now."
@@ -161,8 +247,8 @@ func (tr *e2eLLMTransport) coachNoMemoryToolsResponse(payload chatRequest) *http
 func (tr *e2eLLMTransport) noMemoryHitResponse(payload chatRequest) *http.Response {
 	switch len(tr.requests) {
 	case 1:
-		if len(payload.Tools) != 2 {
-			tr.t.Fatalf("expected analysis tools to be available in analyst mode, got %d", len(payload.Tools))
+		if len(payload.Tools) != 4 {
+			tr.t.Fatalf("expected analysis tools to be available in analysis mode, got %d", len(payload.Tools))
 		}
 		return tr.jsonResponse(completionResponse{
 			Choices: []completionChoice{{
@@ -356,7 +442,7 @@ func readRunnerOutput(t *testing.T, channels StreamChannels) string {
 	return strings.TrimSpace(output.String())
 }
 
-func TestRunnerE2EAnalystMemoryRecall(t *testing.T) {
+func TestRunnerE2EAnalysisMemoryRecall(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	if _, err := EnsurePersonaFile(); err != nil {
@@ -369,7 +455,7 @@ func TestRunnerE2EAnalystMemoryRecall(t *testing.T) {
 		memories: []MemorySnippet{
 			{SessionID: "2026-04-05-120000", Summary: "## Overview\nWork avoidance and fear of judgment.", Score: 9},
 		},
-		transcript: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
+		transcriptExcerpt: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
 	}
 
 	service, err := NewService(client, BuiltInModes()[2])
@@ -389,7 +475,7 @@ func TestRunnerE2EAnalystMemoryRecall(t *testing.T) {
 	}
 }
 
-func TestRunnerE2EAnalystCanSkipMemoryTools(t *testing.T) {
+func TestRunnerE2EAnalysisCanSkipMemoryTools(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	if _, err := EnsurePersonaFile(); err != nil {
@@ -402,7 +488,7 @@ func TestRunnerE2EAnalystCanSkipMemoryTools(t *testing.T) {
 		memories: []MemorySnippet{
 			{SessionID: "2026-04-05-120000", Summary: "## Overview\nWork avoidance and fear of judgment.", Score: 9},
 		},
-		transcript: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
+		transcriptExcerpt: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
 	}
 
 	service, err := NewService(client, BuiltInModes()[2])
@@ -422,7 +508,7 @@ func TestRunnerE2EAnalystCanSkipMemoryTools(t *testing.T) {
 	}
 }
 
-func TestRunnerE2ECoachDoesNotExposeAnalystMemoryTools(t *testing.T) {
+func TestRunnerE2ECoachDoesNotExposeAnalysisMemoryTools(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	if _, err := EnsurePersonaFile(); err != nil {
@@ -435,7 +521,7 @@ func TestRunnerE2ECoachDoesNotExposeAnalystMemoryTools(t *testing.T) {
 		memories: []MemorySnippet{
 			{SessionID: "2026-04-05-120000", Summary: "## Overview\nWork avoidance and fear of judgment.", Score: 9},
 		},
-		transcript: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
+		transcriptExcerpt: "User: I was afraid of being judged when shipping.\nAssistant: We named the fear directly.",
 	}
 
 	service, err := NewService(client, DefaultMode())
@@ -455,7 +541,7 @@ func TestRunnerE2ECoachDoesNotExposeAnalystMemoryTools(t *testing.T) {
 	}
 }
 
-func TestRunnerE2EAnalystNoMemoryHit(t *testing.T) {
+func TestRunnerE2EAnalysisNoMemoryHit(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	if _, err := EnsurePersonaFile(); err != nil {
@@ -483,7 +569,7 @@ func TestRunnerE2EAnalystNoMemoryHit(t *testing.T) {
 	}
 }
 
-func TestRunnerE2EAnalystEmptyExcerptFallsBackGracefully(t *testing.T) {
+func TestRunnerE2EAnalysisEmptyExcerptFallsBackGracefully(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	if _, err := EnsurePersonaFile(); err != nil {
@@ -496,7 +582,7 @@ func TestRunnerE2EAnalystEmptyExcerptFallsBackGracefully(t *testing.T) {
 		memories: []MemorySnippet{
 			{SessionID: "2026-04-05-120000", Summary: "## Overview\nA related prior session exists.", Score: 9},
 		},
-		transcript: "",
+		transcriptExcerpt: "",
 	}
 
 	service, err := NewService(client, BuiltInModes()[2])
@@ -513,6 +599,70 @@ func TestRunnerE2EAnalystEmptyExcerptFallsBackGracefully(t *testing.T) {
 	}
 	if store.transcriptCalls != 1 {
 		t.Fatalf("expected one transcript lookup, got %d", store.transcriptCalls)
+	}
+}
+
+func TestRunnerE2EAnalysisCanLoadLatestRawTranscript(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	if _, err := EnsurePersonaFile(); err != nil {
+		t.Fatalf("EnsurePersonaFile() error = %v", err)
+	}
+
+	transport := &e2eLLMTransport{t: t, scenario: "raw-latest-transcript"}
+	client := newE2EClient(t, transport)
+	store := &stubSessionStore{
+		transcriptExact: MemoryTranscript{
+			SessionID:  "2026-04-05-120000",
+			Transcript: "# Session - 2026-04-05T12:00:00Z\n\n## Conversation\n### User\nI want the raw text from last time.\n\n### Assistant\nHere is what we said.",
+		},
+	}
+
+	service, err := NewService(client, BuiltInModes()[2])
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	service.SetSessionStore(store)
+
+	runner := Runner{Service: service}
+	output := readRunnerOutput(t, runner.Start("tell me the raw text from our last session", NewSessionContext()))
+
+	if !strings.Contains(output, "raw text from last time") {
+		t.Fatalf("expected final output to include quoted transcript text, got %q", output)
+	}
+	if store.exactTranscriptCalls < 1 {
+		t.Fatalf("expected at least one exact transcript lookup, got %d", store.exactTranscriptCalls)
+	}
+}
+
+func TestRunnerE2EAnalysisCanSearchRawTranscripts(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	if _, err := EnsurePersonaFile(); err != nil {
+		t.Fatalf("EnsurePersonaFile() error = %v", err)
+	}
+
+	transport := &e2eLLMTransport{t: t, scenario: "raw-transcript-search"}
+	client := newE2EClient(t, transport)
+	store := &stubSessionStore{
+		transcriptMatches: []MemorySnippet{{
+			SessionID: "2026-04-05-120000",
+			Excerpt:   "User: What should go on the stop-doing list?\nAssistant: Let's create a stop-doing list for the habits that keep derailing you.",
+			Score:     8,
+		}},
+	}
+
+	service, err := NewService(client, BuiltInModes()[2])
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	service.SetSessionStore(store)
+
+	runner := Runner{Service: service}
+	output := readRunnerOutput(t, runner.Start("what is that stop-doing list coming from? i dont remember talking about it in previous sessions", NewSessionContext()))
+
+	if !strings.Contains(output, "stop-doing list") {
+		t.Fatalf("expected final output to reference transcript hit, got %q", output)
 	}
 }
 

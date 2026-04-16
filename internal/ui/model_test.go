@@ -88,11 +88,11 @@ func newTestUIModel(t *testing.T, mode agent.Mode) Model {
 	return model
 }
 
-func TestHandleWrapCommandPersistsAnalystSession(t *testing.T) {
+func TestHandleWrapCommandPersistsAnalysisSession(t *testing.T) {
 	model := newTestUIModel(t, agent.Mode{
-		ID:           agent.ModeAnalyst,
-		Name:         "Analyst",
-		Description:  "Test analyst",
+		ID:           agent.ModeAnalysis,
+		Name:         "Analysis",
+		Description:  "Test analysis",
 		Instructions: "Test instructions",
 	})
 
@@ -112,16 +112,19 @@ func TestHandleWrapCommandPersistsAnalystSession(t *testing.T) {
 	if got.statusMessage != text.SessionWrapped(model.currentMode.Name) {
 		t.Fatalf("expected wrap status to use centralized copy, got %q", got.statusMessage)
 	}
-	if quitCmd == nil {
-		t.Fatal("expected /wrap to return a quit command")
+	if !got.wrapping {
+		t.Fatal("expected wrap flow to enter wrapping state")
 	}
-	if quitMsg := quitCmd(); quitMsg == nil {
-		t.Fatal("expected quit command to return a message")
-	} else if _, ok := quitMsg.(tea.QuitMsg); !ok {
-		t.Fatalf("expected tea.QuitMsg, got %T", quitMsg)
+	if quitCmd == nil {
+		t.Fatal("expected /wrap to return a wrap command")
+	}
+	if wrapMsg := quitCmd(); wrapMsg == nil {
+		t.Fatal("expected wrap command to return a message")
+	} else if _, ok := wrapMsg.(wrapCompleteMsg); !ok {
+		t.Fatalf("expected wrapCompleteMsg, got %T", wrapMsg)
 	}
 
-	modeDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModeAnalyst))
+	modeDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModeAnalysis))
 	entries, err := os.ReadDir(modeDir)
 	if err != nil {
 		t.Fatalf("expected persisted session files: %v", err)
@@ -131,11 +134,59 @@ func TestHandleWrapCommandPersistsAnalystSession(t *testing.T) {
 	}
 }
 
+func TestHandleCommandTreatsWrapAsUnknownInCoachMode(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModeCoach,
+		Name:         "Coach",
+		Description:  "Test coach",
+		Instructions: "Test instructions",
+	})
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I need help sorting out today.",
+		Assistant: "Let's break it down.",
+		CreatedAt: time.Now().UTC(),
+	})
+
+	updated, quitCmd := model.handleCommand("/wrap")
+	got := updated.(Model)
+
+	if quitCmd != nil {
+		t.Fatal("expected /wrap in coach mode not to quit")
+	}
+	if got.err == nil || got.err.Error() != text.UnknownCommand("/wrap") {
+		t.Fatalf("expected coach /wrap to be treated as unknown command, got %v", got.err)
+	}
+
+	modeDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModeCoach))
+	if _, err := os.Stat(modeDir); !os.IsNotExist(err) {
+		t.Fatalf("expected coach /wrap not to persist any session data, got err=%v", err)
+	}
+}
+
+func TestSwitchToModeClearsStaleErrors(t *testing.T) {
+	model := newTestUIModel(t, agent.BuiltInModes()[0])
+	model.err = errors.New("stale error")
+	model.modeSelector.active = true
+	model.input = "/mode"
+	model.modeSelector.index = 1
+
+	updated, _ := model.selectHighlightedMode()
+	got := updated.(Model)
+
+	if got.currentMode.ID != agent.ModePerformanceReview {
+		t.Fatalf("expected switch to performance review, got %q", got.currentMode.ID)
+	}
+	if got.err != nil {
+		t.Fatalf("expected successful mode switch to clear stale error, got %v", got.err)
+	}
+}
+
 func TestPersistCurrentSessionUsesBackgroundFriendlyPath(t *testing.T) {
 	model := newTestUIModel(t, agent.Mode{
-		ID:           agent.ModeAnalyst,
-		Name:         "Analyst",
-		Description:  "Test analyst",
+		ID:           agent.ModeAnalysis,
+		Name:         "Analysis",
+		Description:  "Test analysis",
 		Instructions: "Test instructions",
 	})
 
@@ -151,7 +202,32 @@ func TestPersistCurrentSessionUsesBackgroundFriendlyPath(t *testing.T) {
 	}
 }
 
-func TestSelectHighlightedModeWarnsBeforeDiscardingUnsavedAnalystSession(t *testing.T) {
+func TestPersistCurrentSessionSavesPerformanceReviewSession(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModePerformanceReview,
+		Name:         "Performance Review",
+		Description:  "Test performance review",
+		Instructions: "Test instructions",
+	})
+
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I keep starting important work late in the day.",
+		Assistant: "That is a recurring execution problem, not a scheduling surprise.",
+		CreatedAt: time.Now().UTC(),
+	})
+
+	if err := model.persistCurrentSession(context.Background()); err != nil {
+		t.Fatalf("persistCurrentSession() error = %v", err)
+	}
+
+	currentPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModePerformanceReview), "current.md")
+	if _, err := os.Stat(currentPath); err != nil {
+		t.Fatalf("expected current performance review summary at %s: %v", currentPath, err)
+	}
+}
+
+func TestSelectHighlightedModeWarnsBeforeDiscardingUnsavedAnalysisSession(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[2])
 
 	model.session = agent.NewSessionContext()
@@ -167,7 +243,7 @@ func TestSelectHighlightedModeWarnsBeforeDiscardingUnsavedAnalystSession(t *test
 	updated, _ := model.selectHighlightedMode()
 	got := updated.(Model)
 
-	if got.currentMode.ID != agent.ModeAnalyst {
+	if got.currentMode.ID != agent.ModeAnalysis {
 		t.Fatal("expected mode switch to be blocked")
 	}
 	if got.pendingSwitch != agent.ModeCoach {
@@ -199,16 +275,81 @@ func TestSelectHighlightedModeSecondAttemptDiscardsAndSwitches(t *testing.T) {
 	if got.currentMode.ID != agent.ModeCoach {
 		t.Fatalf("expected second switch attempt to discard and switch, got %q", got.currentMode.ID)
 	}
-	if len(got.session.Recent) != 0 {
-		t.Fatalf("expected fresh session after discard on switch, got %d turns", len(got.session.Recent))
+	if len(got.session.WorkingHistory) != 0 {
+		t.Fatalf("expected fresh session after discard on switch, got %d turns", len(got.session.WorkingHistory))
 	}
 }
 
-func TestCtrlCWarnsBeforeDiscardingUnsavedAnalystSession(t *testing.T) {
+func TestSelectHighlightedModeWarnsBeforeDiscardingUnsavedPerformanceReviewSession(t *testing.T) {
 	model := newTestUIModel(t, agent.Mode{
-		ID:           agent.ModeAnalyst,
-		Name:         "Analyst",
-		Description:  "Test analyst",
+		ID:           agent.ModePerformanceReview,
+		Name:         "Performance Review",
+		Description:  "Test performance review",
+		Instructions: "Test instructions",
+	})
+
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I am still deferring the hard task until the afternoon.",
+		Assistant: "That keeps showing up as avoidant sequencing.",
+		CreatedAt: time.Now().UTC(),
+	})
+	model.modeSelector.active = true
+	model.input = "/mode"
+	model.modeSelector.index = 0
+
+	updated, _ := model.selectHighlightedMode()
+	got := updated.(Model)
+
+	if got.currentMode.ID != agent.ModePerformanceReview {
+		t.Fatalf("expected mode switch to be blocked, got %q", got.currentMode.ID)
+	}
+	if got.pendingSwitch != agent.ModeCoach {
+		t.Fatalf("expected pending switch to coach, got %q", got.pendingSwitch)
+	}
+	if !strings.Contains(got.statusMessage, "switch to Coach again to discard it") {
+		t.Fatalf("expected discard warning, got %q", got.statusMessage)
+	}
+}
+
+func TestSelectHighlightedModeSecondAttemptDiscardsUnsavedPerformanceReviewSession(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModePerformanceReview,
+		Name:         "Performance Review",
+		Description:  "Test performance review",
+		Instructions: "Test instructions",
+	})
+
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I am still deferring the hard task until the afternoon.",
+		Assistant: "That keeps showing up as avoidant sequencing.",
+		CreatedAt: time.Now().UTC(),
+	})
+	model.modeSelector.active = true
+	model.input = "/mode"
+	model.modeSelector.index = 0
+
+	updated, _ := model.selectHighlightedMode()
+	warned := updated.(Model)
+
+	updated, _ = warned.selectHighlightedMode()
+	got := updated.(Model)
+
+	if got.currentMode.ID != agent.ModeCoach {
+		t.Fatalf("expected second switch attempt to discard and switch, got %q", got.currentMode.ID)
+	}
+	currentPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModePerformanceReview), "current.md")
+	if _, err := os.Stat(currentPath); !os.IsNotExist(err) {
+		t.Fatalf("expected discarded performance review switch not to persist session data, got err=%v", err)
+	}
+}
+
+func TestCtrlCWarnsBeforeDiscardingUnsavedAnalysisSession(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModeAnalysis,
+		Name:         "Analysis",
+		Description:  "Test analysis",
 		Instructions: "Test instructions",
 	})
 
@@ -233,11 +374,11 @@ func TestCtrlCWarnsBeforeDiscardingUnsavedAnalystSession(t *testing.T) {
 	}
 }
 
-func TestSecondCtrlCBeginsShutdownAfterAnalystDiscardWarning(t *testing.T) {
+func TestSecondCtrlCBeginsShutdownAfterAnalysisDiscardWarning(t *testing.T) {
 	model := newTestUIModel(t, agent.Mode{
-		ID:           agent.ModeAnalyst,
-		Name:         "Analyst",
-		Description:  "Test analyst",
+		ID:           agent.ModeAnalysis,
+		Name:         "Analysis",
+		Description:  "Test analysis",
 		Instructions: "Test instructions",
 	})
 
@@ -282,9 +423,14 @@ func TestSecondCtrlCBeginsShutdownAfterAnalystDiscardWarning(t *testing.T) {
 	} else if _, ok := quitMsg.(tea.QuitMsg); !ok {
 		t.Fatalf("expected tea.QuitMsg, got %T", quitMsg)
 	}
+
+	modeDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModeAnalysis))
+	if _, err := os.Stat(modeDir); !os.IsNotExist(err) {
+		t.Fatalf("expected analysis discard path not to persist session data, got err=%v", err)
+	}
 }
 
-func TestCtrlCWarnsBeforeShutdownOutsideAnalystMode(t *testing.T) {
+func TestCtrlCWarnsBeforeShutdownOutsideAnalysisMode(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[0])
 
 	canceled := false
@@ -313,7 +459,7 @@ func TestCtrlCWarnsBeforeShutdownOutsideAnalystMode(t *testing.T) {
 	}
 }
 
-func TestSecondCtrlCStartsShutdownOutsideAnalystMode(t *testing.T) {
+func TestSecondCtrlCStartsShutdownOutsideAnalysisMode(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[0])
 
 	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -333,11 +479,74 @@ func TestSecondCtrlCStartsShutdownOutsideAnalystMode(t *testing.T) {
 	}
 }
 
-func TestCtrlCWarnsBeforeShutdownInAnalystModeWhenNoUnsavedSession(t *testing.T) {
+func TestCtrlCWarnsBeforeDiscardingUnsavedPerformanceReviewSession(t *testing.T) {
 	model := newTestUIModel(t, agent.Mode{
-		ID:           agent.ModeAnalyst,
-		Name:         "Analyst",
-		Description:  "Test analyst",
+		ID:           agent.ModePerformanceReview,
+		Name:         "Performance Review",
+		Description:  "Test performance review",
+		Instructions: "Test instructions",
+	})
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I said I would tighten the morning routine and I still have not.",
+		Assistant: "That gap between stated standard and execution is the issue to watch.",
+		CreatedAt: time.Now().UTC(),
+	})
+
+	updated, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got := updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected first Ctrl+C to warn instead of quitting")
+	}
+	if !got.pendingQuit {
+		t.Fatal("expected pendingQuit to be set after warning")
+	}
+	if got.statusMessage != text.UnsavedSessionQuitMsg {
+		t.Fatalf("expected discard warning, got %q", got.statusMessage)
+	}
+}
+
+func TestSecondCtrlCDiscardsPerformanceReviewBeforeShutdown(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModePerformanceReview,
+		Name:         "Performance Review",
+		Description:  "Test performance review",
+		Instructions: "Test instructions",
+	})
+	model.session = agent.NewSessionContext()
+	model.session.AddTurn(agent.Turn{
+		User:      "I said I would tighten the morning routine and I still have not.",
+		Assistant: "That gap between stated standard and execution is the issue to watch.",
+		CreatedAt: time.Now().UTC(),
+	})
+
+	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	warned := updated.(Model)
+
+	updated, cmd := warned.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected second Ctrl+C to start shutdown")
+	}
+	if !got.shuttingDown {
+		t.Fatal("expected shuttingDown to be true")
+	}
+	if got.statusMessage != text.ShuttingDown {
+		t.Fatalf("expected shutting down status immediately, got %q", got.statusMessage)
+	}
+	currentPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "project-orb", "sessions", string(agent.ModePerformanceReview), "current.md")
+	if _, err := os.Stat(currentPath); !os.IsNotExist(err) {
+		t.Fatalf("expected discarded performance review shutdown not to persist session data, got err=%v", err)
+	}
+}
+
+func TestCtrlCWarnsBeforeShutdownInAnalysisModeWhenNoUnsavedSession(t *testing.T) {
+	model := newTestUIModel(t, agent.Mode{
+		ID:           agent.ModeAnalysis,
+		Name:         "Analysis",
+		Description:  "Test analysis",
 		Instructions: "Test instructions",
 	})
 
@@ -421,6 +630,36 @@ func TestHandleStreamDoneCanceledRemovesThinkingAndRestoresInput(t *testing.T) {
 	after := ansi.Strip(got.viewport.View())
 	if strings.Contains(after, ThinkingText) {
 		t.Fatalf("expected thinking state to be removed after cancel, got %q", after)
+	}
+}
+
+func TestHandleStreamDoneKeepsStartupMessagesAfterCompletedReply(t *testing.T) {
+	model := newTestUIModel(t, agent.BuiltInModes()[0])
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(Model)
+	model.pendingPrompt = "What should I focus on?"
+	model.output = "Start with the highest-friction task."
+	model.updateViewportContent()
+
+	updated, _ = model.handleStreamDone(agent.StreamResult{
+		Session: model.session,
+	})
+	got := updated.(Model)
+
+	if len(got.startupMessages) == 0 {
+		t.Fatal("expected startup messages to remain after the first completed reply")
+	}
+
+	view := ansi.Strip(got.viewport.View())
+	if !strings.Contains(view, "Welcome. What situation, decision, or tension feels most") {
+		t.Fatalf("expected viewport to keep startup message after completed reply, got %q", view)
+	}
+	if !strings.Contains(view, "What should I focus on?") {
+		t.Fatalf("expected viewport to show committed user turn, got %q", view)
+	}
+	if !strings.Contains(view, "Start with the highest-friction task.") {
+		t.Fatalf("expected viewport to show committed assistant turn, got %q", view)
 	}
 }
 
@@ -542,6 +781,37 @@ func TestSyncSlashCommandUIHidesPanelsForNonMatchingCommandTokens(t *testing.T) 
 	}
 }
 
+func TestSyncSlashCommandUIShowsHintsOverlayForWrapInputInAnalysisMode(t *testing.T) {
+	model := newTestUIModel(t, agent.BuiltInModes()[2])
+	model.input = "/wrap"
+	model.modeSelector.active = true
+
+	model.syncSlashCommandUI()
+
+	if !model.hintsOverlay.active {
+		t.Fatal("expected /wrap input to open hints overlay in analysis mode")
+	}
+	if model.modeSelector.active {
+		t.Fatal("expected mode selector to close when /wrap is typed")
+	}
+}
+
+func TestSyncSlashCommandUIDoesNotShowHintsOverlayForWrapInputInCoachMode(t *testing.T) {
+	model := newTestUIModel(t, agent.BuiltInModes()[0])
+	model.input = "/wrap"
+	model.modeSelector.active = true
+	model.hintsOverlay.active = true
+
+	model.syncSlashCommandUI()
+
+	if model.modeSelector.active {
+		t.Fatal("expected coach /wrap input not to keep mode selector open")
+	}
+	if model.hintsOverlay.active {
+		t.Fatal("expected coach /wrap input not to show hints overlay")
+	}
+}
+
 func TestNewModelShowsCoachStartupMessage(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[0])
 
@@ -553,7 +823,7 @@ func TestNewModelShowsCoachStartupMessage(t *testing.T) {
 	}
 }
 
-func TestSelectHighlightedModeRefreshesStartupMessagesForNonAnalystMode(t *testing.T) {
+func TestSelectHighlightedModeRefreshesStartupMessagesForNonAnalysisMode(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[2])
 	model.modeSelector.active = true
 	model.input = "/mode"
@@ -573,7 +843,7 @@ func TestSelectHighlightedModeRefreshesStartupMessagesForNonAnalystMode(t *testi
 	}
 }
 
-func TestSwitchingFromCoachToAnalystClearsVisibleConversation(t *testing.T) {
+func TestSwitchingFromCoachToAnalysisClearsVisibleConversation(t *testing.T) {
 	model := newTestUIModel(t, agent.BuiltInModes()[0])
 	model.session = agent.NewSessionContext()
 	model.session.AddTurn(agent.Turn{
@@ -598,8 +868,8 @@ func TestSwitchingFromCoachToAnalystClearsVisibleConversation(t *testing.T) {
 	updated, _ = model.selectHighlightedMode()
 	got := updated.(Model)
 
-	if got.currentMode.ID != agent.ModeAnalyst {
-		t.Fatalf("expected mode switch to analyst, got %q", got.currentMode.ID)
+	if got.currentMode.ID != agent.ModeAnalysis {
+		t.Fatalf("expected mode switch to analysis, got %q", got.currentMode.ID)
 	}
 
 	after := ansi.Strip(got.viewport.View())
@@ -608,7 +878,7 @@ func TestSwitchingFromCoachToAnalystClearsVisibleConversation(t *testing.T) {
 	}
 }
 
-func TestAnalystModeLoadsFirstMessageImmediately(t *testing.T) {
+func TestAnalysisModeLoadsFirstMessageImmediately(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
@@ -631,8 +901,8 @@ func TestAnalystModeLoadsFirstMessageImmediately(t *testing.T) {
 		t.Fatalf("NewFileSessionStore() error = %v", err)
 	}
 
-	analystMode := agent.BuiltInModes()[2] // Analyst mode
-	service, err := agent.NewService(client, analystMode)
+	analysisMode := agent.BuiltInModes()[2]
+	service, err := agent.NewService(client, analysisMode)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -640,7 +910,7 @@ func TestAnalystModeLoadsFirstMessageImmediately(t *testing.T) {
 
 	model, err := NewModel(ModelDependencies{
 		Client:         client,
-		CurrentMode:    analystMode,
+		CurrentMode:    analysisMode,
 		AgentName:      "Agent",
 		InitialSession: agent.NewSessionContext(),
 		SessionStore:   store,
@@ -687,22 +957,22 @@ func TestAnalystModeLoadsFirstMessageImmediately(t *testing.T) {
 		t.Fatalf("expected tea.BatchMsg, got %T", batchMsg)
 	}
 
-	// Find and execute the analyst message load command
-	var analystMsg analystSecondMessageLoadedMsg
+	// Find and execute the analysis message load command
+	var analysisMsg analysisSecondMessageLoadedMsg
 	for _, batchCmd := range batch {
 		msg := batchCmd()
-		if am, ok := msg.(analystSecondMessageLoadedMsg); ok {
-			analystMsg = am
+		if am, ok := msg.(analysisSecondMessageLoadedMsg); ok {
+			analysisMsg = am
 			break
 		}
 	}
 
-	if analystMsg.err != nil {
-		t.Fatalf("expected no error loading second message, got %v", analystMsg.err)
+	if analysisMsg.err != nil {
+		t.Fatalf("expected no error loading second message, got %v", analysisMsg.err)
 	}
 
 	// Update model with second message
-	updated, _ = model.Update(analystMsg)
+	updated, _ = model.Update(analysisMsg)
 	model = updated.(Model)
 
 	// Now should have 2 messages
@@ -711,7 +981,7 @@ func TestAnalystModeLoadsFirstMessageImmediately(t *testing.T) {
 	}
 
 	// Loading state should be cleared
-	if model.loadingAnalystMessage {
+	if model.loadingAnalysisMessage {
 		t.Fatal("expected loading state to be cleared after message loaded")
 	}
 }
@@ -720,7 +990,7 @@ func agentStartupCoachMessageForTest() string {
 	return "Welcome. What situation, decision, or tension feels most significant right now? We will work through it together."
 }
 
-func TestAnalystModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T) {
+func TestAnalysisModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
@@ -743,8 +1013,8 @@ func TestAnalystModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T)
 		t.Fatalf("NewFileSessionStore() error = %v", err)
 	}
 
-	analystMode := agent.BuiltInModes()[2] // Analyst mode
-	service, err := agent.NewService(client, analystMode)
+	analysisMode := agent.BuiltInModes()[2]
+	service, err := agent.NewService(client, analysisMode)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -752,7 +1022,7 @@ func TestAnalystModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T)
 
 	model, err := NewModel(ModelDependencies{
 		Client:         client,
-		CurrentMode:    analystMode,
+		CurrentMode:    analysisMode,
 		AgentName:      "Agent",
 		InitialSession: agent.NewSessionContext(),
 		SessionStore:   store,
@@ -775,7 +1045,7 @@ func TestAnalystModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T)
 	model = updated.(Model)
 
 	// Should be in loading state
-	if !model.loadingAnalystMessage {
+	if !model.loadingAnalysisMessage {
 		t.Fatal("expected loading state to be active")
 	}
 
@@ -788,5 +1058,55 @@ func TestAnalystModeShowsLoadingAnimationWhileLoadingSecondMessage(t *testing.T)
 
 	if !strings.Contains(view, "Loading memory") {
 		t.Fatalf("expected loading animation to be visible, got: %q", view)
+	}
+}
+
+func TestHandleKeyMovesCursorAndInsertsAtCursor(t *testing.T) {
+	model := newTestUIModel(t, agent.DefaultMode())
+	model.input = "helo"
+	model.inputCursor = 2
+
+	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	got := updated.(Model)
+
+	if got.input != "hello" {
+		t.Fatalf("expected insertion at cursor, got %q", got.input)
+	}
+	if got.inputCursor != 3 {
+		t.Fatalf("expected cursor to advance after insert, got %d", got.inputCursor)
+	}
+}
+
+func TestHandleKeyArrowNavigationMovesCursor(t *testing.T) {
+	model := newTestUIModel(t, agent.DefaultMode())
+	model.input = "hello"
+	model.inputCursor = len([]rune(model.input))
+
+	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyLeft})
+	got := updated.(Model)
+	if got.inputCursor != 4 {
+		t.Fatalf("expected cursor to move left, got %d", got.inputCursor)
+	}
+
+	updated, _ = got.handleKey(tea.KeyMsg{Type: tea.KeyRight})
+	got = updated.(Model)
+	if got.inputCursor != 5 {
+		t.Fatalf("expected cursor to move right, got %d", got.inputCursor)
+	}
+}
+
+func TestHandleKeyBackspaceDeletesRuneBeforeCursor(t *testing.T) {
+	model := newTestUIModel(t, agent.DefaultMode())
+	model.input = "hello"
+	model.inputCursor = 3
+
+	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	got := updated.(Model)
+
+	if got.input != "helo" {
+		t.Fatalf("expected backspace to delete before cursor, got %q", got.input)
+	}
+	if got.inputCursor != 2 {
+		t.Fatalf("expected cursor to move back after delete, got %d", got.inputCursor)
 	}
 }

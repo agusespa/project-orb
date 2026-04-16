@@ -36,13 +36,19 @@ This keeps tool use in the planning stage and keeps the streamed response path s
 
 ## Memory Tools
 
-Analysis mode currently exposes two tools:
+Analysis mode currently exposes four tools:
 
 1. `search_memories`
 Searches prior saved session summaries semantically and returns matching session ids, summaries, and similarity scores.
 
-2. `load_memory_excerpt`
+2. `search_memory_transcripts`
+Searches across saved raw transcript files and returns matching session ids plus transcript excerpts for details that may not appear in summaries.
+
+3. `load_memory_excerpt`
 Loads a short transcript excerpt for a previously found session when the model wants exact prior details.
+
+4. `load_memory_transcript`
+Loads the exact saved transcript markdown for a prior session. If no `session_id` is supplied, it loads the latest saved analysis session transcript directly.
 
 These tools are only available in Analysis mode. Tool access is mode-scoped so each mode sees only the capabilities that fit its job.
 
@@ -129,8 +135,10 @@ When the app needs relevant past context:
 3. It computes similarity between the query vector and each saved summary vector
 4. It ranks the summaries by cosine similarity
 5. The model decides whether it should call `search_memories`
-6. If the model needs exact prior detail, it can call `load_memory_excerpt` for a returned session id
-7. Tool results are fed back into the model during the Analysis step before the final response is written
+6. If summary search misses a detail, the model can call `search_memory_transcripts` to search raw saved session text directly
+7. If the model needs exact prior detail, it can call `load_memory_excerpt` for a returned session id
+8. If the user asks for raw or exact wording, the model can call `load_memory_transcript` and quote only from the loaded transcript
+9. Tool results are fed back into the model during the Analysis step before the final response is written
 
 ## Why This Shape
 

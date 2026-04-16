@@ -118,16 +118,16 @@ func initialModel(setupResult *setup.Result, shutdown func() error) (ui.Model, e
 
 	initialSession := agent.NewSessionContext()
 	statusMessage := ""
-	if mode.ID == agent.ModeAnalyst {
+	if mode.ID == agent.ModeAnalysis || mode.ID == agent.ModePerformanceReview {
 		service, err := agent.NewService(client, mode)
 		if err != nil {
-			return ui.Model{}, fmt.Errorf("create initial analysis service: %w", err)
+			return ui.Model{}, fmt.Errorf("create initial %s service: %w", mode.ID, err)
 		}
 		service.SetSessionStore(sessionStore)
 
 		session, _, err := service.LoadSession(context.Background())
 		if err != nil {
-			return ui.Model{}, fmt.Errorf("load saved analysis session: %w", err)
+			return ui.Model{}, fmt.Errorf("load saved %s session: %w", mode.ID, err)
 		}
 		initialSession = session
 	}

@@ -11,13 +11,13 @@ func TestDefaultModeIsCoach(t *testing.T) {
 	}
 }
 
-func TestFindModeFindsAnalyst(t *testing.T) {
-	got, ok := FindMode("analyst")
+func TestFindModeFindsAnalysis(t *testing.T) {
+	got, ok := FindMode("analysis")
 	if !ok {
-		t.Fatal("expected to find analyst mode")
+		t.Fatal("expected to find analysis mode")
 	}
-	if got.ID != ModeAnalyst {
-		t.Fatalf("expected analyst mode, got %q", got.ID)
+	if got.ID != ModeAnalysis {
+		t.Fatalf("expected analysis mode, got %q", got.ID)
 	}
 }
 
@@ -35,12 +35,18 @@ func TestFindModeFindsSetup(t *testing.T) {
 }
 
 func TestModeAllowsToolRespectsModeCapabilities(t *testing.T) {
-	analyst, ok := FindMode("analyst")
+	analysis, ok := FindMode("analysis")
 	if !ok {
-		t.Fatal("expected to find analyst mode")
+		t.Fatal("expected to find analysis mode")
 	}
-	if !analyst.AllowsTool(toolSearchMemories) {
-		t.Fatal("expected analyst mode to allow memory search")
+	if !analysis.AllowsTool(toolSearchMemories) {
+		t.Fatal("expected analysis mode to allow memory search")
+	}
+	if !analysis.AllowsTool(toolSearchMemoryTranscripts) {
+		t.Fatal("expected analysis mode to allow raw transcript search")
+	}
+	if !analysis.AllowsTool(toolLoadMemoryTranscript) {
+		t.Fatal("expected analysis mode to allow raw transcript loading")
 	}
 
 	coach := DefaultMode()

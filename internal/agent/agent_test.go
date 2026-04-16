@@ -17,14 +17,14 @@ func TestSessionContextWordCount(t *testing.T) {
 		{
 			name: "empty session",
 			session: SessionContext{
-				Recent: []Turn{},
+				WorkingHistory: []Turn{},
 			},
 			wantWord: 0,
 		},
 		{
 			name: "single turn",
 			session: SessionContext{
-				Recent: []Turn{
+				WorkingHistory: []Turn{
 					{User: "hello world", Assistant: "hi there"},
 				},
 			},
@@ -33,7 +33,7 @@ func TestSessionContextWordCount(t *testing.T) {
 		{
 			name: "multiple turns",
 			session: SessionContext{
-				Recent: []Turn{
+				WorkingHistory: []Turn{
 					{User: "one two three", Assistant: "four five"},
 					{User: "six", Assistant: "seven eight nine"},
 				},
@@ -43,7 +43,7 @@ func TestSessionContextWordCount(t *testing.T) {
 		{
 			name: "whitespace handling",
 			session: SessionContext{
-				Recent: []Turn{
+				WorkingHistory: []Turn{
 					{User: "  hello   world  ", Assistant: "  test  "},
 				},
 			},
@@ -53,7 +53,7 @@ func TestSessionContextWordCount(t *testing.T) {
 			name: "summary not counted",
 			session: SessionContext{
 				Summary: strings.Repeat("word ", 1000), // 1000 words in summary
-				Recent: []Turn{
+				WorkingHistory: []Turn{
 					{User: "hello", Assistant: "world"},
 				},
 			},
@@ -73,14 +73,14 @@ func TestSessionContextWordCount(t *testing.T) {
 
 func TestServicePrepareSessionWithinLimit(t *testing.T) {
 	called := false
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithCompactor(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		called = true
 		return "", nil
 	})
 
 	session := SessionContext{
 		Summary: "existing",
-		Recent: []Turn{
+		WorkingHistory: []Turn{
 			{User: "short", Assistant: "reply"},
 			{User: "another", Assistant: "response"},
 		},
@@ -94,7 +94,7 @@ func TestServicePrepareSessionWithinLimit(t *testing.T) {
 		t.Fatal("expected summarizer not to be called for short history")
 	}
 
-	if got := len(session.Recent); got != 2 {
+	if got := len(session.WorkingHistory); got != 2 {
 		t.Fatalf("expected 2 recent turns, got %d", got)
 	}
 }
@@ -102,18 +102,18 @@ func TestServicePrepareSessionWithinLimit(t *testing.T) {
 func TestServicePrepareSessionCompactsOverflow(t *testing.T) {
 	var gotExisting string
 	var gotTurns []Turn
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithCompactor(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		gotExisting = existingSummary
 		gotTurns = append([]Turn(nil), turns...)
 		return "new summary", nil
 	})
 
-	// Create turns with enough words to exceed maxRecentWords (2000)
+	// Create turns with enough words to exceed maxWorkingHistoryWords (2000)
 	// Each turn has ~250 words, so 10 turns = ~2500 words
 	longText := strings.Repeat("word ", 250)
 	session := SessionContext{
 		Summary: "old summary",
-		Recent: []Turn{
+		WorkingHistory: []Turn{
 			{User: longText, Assistant: longText},
 			{User: longText, Assistant: longText},
 			{User: longText, Assistant: longText},
@@ -126,7 +126,7 @@ func TestServicePrepareSessionCompactsOverflow(t *testing.T) {
 	}
 
 	initialWordCount := session.WordCount()
-	if initialWordCount <= maxRecentWords {
+	if initialWordCount <= maxWorkingHistoryWords {
 		t.Fatalf("test setup error: session should exceed word limit, got %d words", initialWordCount)
 	}
 
@@ -146,25 +146,55 @@ func TestServicePrepareSessionCompactsOverflow(t *testing.T) {
 		t.Fatalf("expected updated summary, got %q", session.Summary)
 	}
 
-	if len(session.Recent) < minRecentTurns {
-		t.Fatalf("expected at least %d recent turns after compaction, got %d", minRecentTurns, len(session.Recent))
+	if len(session.WorkingHistory) < minWorkingHistoryTurns {
+		t.Fatalf("expected at least %d recent turns after compaction, got %d", minWorkingHistoryTurns, len(session.WorkingHistory))
 	}
 
-	if session.WordCount() > maxRecentWords {
-		t.Fatalf("expected word count under %d after compaction, got %d", maxRecentWords, session.WordCount())
+	if session.WordCount() > maxWorkingHistoryWords {
+		t.Fatalf("expected word count under %d after compaction, got %d", maxWorkingHistoryWords, session.WordCount())
+	}
+}
+
+func TestServicePrepareSessionRecompactsOversizedSummary(t *testing.T) {
+	called := false
+	service := newServiceWithCompactor(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+		called = true
+		if len(turns) != 0 {
+			t.Fatalf("expected summary-only compaction, got %d turns", len(turns))
+		}
+		return "compressed summary", nil
+	})
+
+	session := SessionContext{
+		Summary: strings.Repeat("summary ", maxTotalWords+50),
+		WorkingHistory: []Turn{
+			{User: "short", Assistant: "reply"},
+			{User: "still short", Assistant: "still fine"},
+		},
+	}
+
+	if err := service.PrepareSession(context.Background(), &session); err != nil {
+		t.Fatalf("PrepareSession() error = %v", err)
+	}
+
+	if !called {
+		t.Fatal("expected oversized summary to be re-compacted")
+	}
+	if session.Summary != "compressed summary" {
+		t.Fatalf("expected summary to be replaced, got %q", session.Summary)
 	}
 }
 
 func TestServicePrepareSessionEmptySession(t *testing.T) {
 	called := false
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithCompactor(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		called = true
 		return "", nil
 	})
 
 	session := SessionContext{
-		Summary: "",
-		Recent:  []Turn{},
+		Summary:        "",
+		WorkingHistory: []Turn{},
 	}
 
 	if err := service.PrepareSession(context.Background(), &session); err != nil {
@@ -175,21 +205,21 @@ func TestServicePrepareSessionEmptySession(t *testing.T) {
 		t.Fatal("expected summarizer not to be called for empty session")
 	}
 
-	if len(session.Recent) != 0 {
-		t.Fatalf("expected 0 recent turns, got %d", len(session.Recent))
+	if len(session.WorkingHistory) != 0 {
+		t.Fatalf("expected 0 recent turns, got %d", len(session.WorkingHistory))
 	}
 }
 
 func TestServicePrepareSessionPropagatesSummaryError(t *testing.T) {
 	wantErr := errors.New("summary failed")
-	service := newServiceWithSummarizer(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
+	service := newServiceWithCompactor(testClient(), DefaultMode(), func(ctx context.Context, client *Client, existingSummary string, turns []Turn) (string, error) {
 		return "", wantErr
 	})
 
 	// Create turns with enough words to exceed limit (400 words per turn, 6 turns = 4800 words)
 	longText := strings.Repeat("word ", 400)
 	session := SessionContext{
-		Recent: []Turn{
+		WorkingHistory: []Turn{
 			{User: longText, Assistant: longText},
 			{User: longText, Assistant: longText},
 			{User: longText, Assistant: longText},

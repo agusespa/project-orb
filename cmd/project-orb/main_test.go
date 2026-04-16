@@ -11,7 +11,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"project-orb/internal/agent"
 	"project-orb/internal/paths"
+	"project-orb/internal/setup"
+	"project-orb/internal/ui"
 )
 
 type shutdownManagerStub struct {
@@ -103,6 +106,51 @@ func TestGetLogPathUsesXDGStateHome(t *testing.T) {
 	if got != want {
 		t.Fatalf("getLogPath() = %q, want %q", got, want)
 	}
+}
+
+func TestInitialModelLoadsSavedPerformanceReviewSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if _, err := agent.EnsurePersonaFile(); err != nil {
+		t.Fatalf("EnsurePersonaFile() error = %v", err)
+	}
+
+	store, err := agent.NewFileSessionStore()
+	if err != nil {
+		t.Fatalf("NewFileSessionStore() error = %v", err)
+	}
+
+	session := agent.NewSessionContext()
+	session.SessionID = "2026-04-16-120000"
+	session.Summary = "## Current Assessment\nRecent execution is inconsistent."
+	session.RawHistory = []agent.Turn{{User: "u", Assistant: "a", CreatedAt: time.Now().UTC()}}
+
+	if err := store.SaveSession(context.Background(), agent.ModePerformanceReview, session); err != nil {
+		t.Fatalf("SaveSession() error = %v", err)
+	}
+
+	model, err := initialModel(&setup.Result{
+		SelectedMode: string(agent.ModePerformanceReview),
+	}, func() error { return nil })
+	if err != nil {
+		t.Fatalf("initialModel() error = %v", err)
+	}
+
+	if got := modelInitSessionSummaryForTest(model); got != session.Summary {
+		t.Fatalf("initialModel() loaded summary = %q, want %q", got, session.Summary)
+	}
+}
+
+func modelInitSessionSummaryForTest(model ui.Model) string {
+	value := reflect.ValueOf(&model).Elem()
+	field := value.FieldByName("session")
+	if !field.IsValid() {
+		panic("ui.Model.session field not found")
+	}
+	session := *(*agent.SessionContext)(unsafe.Pointer(field.UnsafeAddr()))
+	return session.Summary
 }
 
 func readProgramStartupOptions(t *testing.T, p *tea.Program) int16 {

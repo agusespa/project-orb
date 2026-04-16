@@ -28,12 +28,16 @@ type shutdownCompleteMsg struct {
 	err error
 }
 
+type wrapCompleteMsg struct {
+	err error
+}
+
 type startupMessagesLoadedMsg struct {
 	messages []string
 	err      error
 }
 
-type analystSecondMessageLoadedMsg struct {
+type analysisSecondMessageLoadedMsg struct {
 	message string
 	err     error
 }
@@ -75,11 +79,13 @@ type Model struct {
 	height int
 
 	input           string
+	inputCursor     int
 	pendingPrompt   string
 	output          string
 	statusMessage   string
 	startupMessages []string
 	pendingQuit     bool
+	discardOnQuit   bool
 	pendingSwitch   agent.ModeID
 
 	modeSelector modeSelector
@@ -97,11 +103,12 @@ type Model struct {
 	shutdownCtx  context.Context
 	shutdownFn   func() error
 	shuttingDown bool
+	wrapping     bool
 	err          error
 
-	// Loading state for analyst second message
-	loadingAnalystMessage bool
-	analystLoadingFrame   int
+	// Loading state for analysis second message
+	loadingAnalysisMessage bool
+	analysisLoadingFrame   int
 
 	styles Styles
 }
@@ -156,15 +163,15 @@ func (m Model) loadStartupMessages() tea.Cmd {
 	}
 }
 
-func (m Model) loadAnalystSecondMessage() tea.Cmd {
+func (m Model) loadAnalysisSecondMessage() tea.Cmd {
 	return func() tea.Msg {
 		runner, err := m.ensureRunner()
 		if err != nil {
-			return analystSecondMessageLoadedMsg{err: err}
+			return analysisSecondMessageLoadedMsg{err: err}
 		}
 
-		message, err := runner.Service.LoadAnalystSecondMessage(context.Background(), m.session)
-		return analystSecondMessageLoadedMsg{
+		message, err := runner.Service.LoadAnalysisSecondMessage(context.Background(), m.session)
+		return analysisSecondMessageLoadedMsg{
 			message: message,
 			err:     err,
 		}
@@ -186,7 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Estimate selector height
 			selectorHeight = min(maxModeSelectorLines+1, len(m.currentModeMatches())+2)
 		} else if m.hintsOverlay.active {
-			selectorHeight = min(maxHintsOverlayLines, len(hintsOverlayLines())+2)
+			selectorHeight = min(maxHintsOverlayLines, len(hintsOverlayLines(m.currentMode.ID))+2)
 		}
 
 		m.viewport.Resize(m.width, m.height, selectorHeight)
@@ -194,7 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case spinnerTickMsg:
-		if !m.stream.active && !m.loadingAnalystMessage {
+		if !m.stream.active && !m.loadingAnalysisMessage {
 			return m, nil
 		}
 		if m.stream.active {
@@ -203,10 +210,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stream.spinnerFrame = (m.stream.spinnerFrame + 1) % textLen
 			}
 		}
-		if m.loadingAnalystMessage {
+		if m.loadingAnalysisMessage {
 			textLen := len([]rune(LoadingMemoryText))
 			if textLen > 0 {
-				m.analystLoadingFrame = (m.analystLoadingFrame + 1) % textLen
+				m.analysisLoadingFrame = (m.analysisLoadingFrame + 1) % textLen
 			}
 		}
 		// Update viewport to show spinner animation
@@ -223,15 +230,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.startupMessages = msg.messages
 		m.updateViewportContent()
 
-		// For analyst mode, load the second message asynchronously
-		if m.currentMode.ID == agent.ModeAnalyst {
-			m.loadingAnalystMessage = true
-			m.analystLoadingFrame = 0
-			return m, tea.Batch(m.loadAnalystSecondMessage(), spinnerTick())
+		// For analysis mode, load the second message asynchronously
+		if m.currentMode.ID == agent.ModeAnalysis {
+			m.loadingAnalysisMessage = true
+			m.analysisLoadingFrame = 0
+			return m, tea.Batch(m.loadAnalysisSecondMessage(), spinnerTick())
 		}
 		return m, nil
-	case analystSecondMessageLoadedMsg:
-		m.loadingAnalystMessage = false
+	case analysisSecondMessageLoadedMsg:
+		m.loadingAnalysisMessage = false
 		if msg.err != nil {
 			m.err = msg.err
 			m.updateViewportContent()
@@ -264,6 +271,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
+	case wrapCompleteMsg:
+		m.wrapping = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.statusMessage = ""
+			return m, nil
+		}
+		return m, tea.Quit
 	}
 
 	// Update viewport for scrolling
@@ -276,14 +291,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.modeSelector.active && !m.stream.active && !m.loadingAnalystMessage {
+	if m.modeSelector.active && !m.stream.active && !m.loadingAnalysisMessage && !m.wrapping {
 		return m.handleModeSelectorKey(msg)
 	}
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		if m.wrapping {
+			return m, nil
+		}
 		return m.handleCtrlC()
 	case tea.KeyEsc:
+		if m.wrapping {
+			return m, nil
+		}
 		if m.hintsOverlay.active {
 			m.hintsOverlay.active = false
 			return m, nil
@@ -294,30 +315,58 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyEnter:
-		return m.startPrompt()
-	case tea.KeyBackspace, tea.KeyDelete:
-		if m.stream.active || m.loadingAnalystMessage || len(m.input) == 0 {
+		if m.wrapping {
 			return m, nil
 		}
-		runes := []rune(m.input)
-		m.input = string(runes[:len(runes)-1])
+		return m.startPrompt()
+	case tea.KeyLeft:
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
+			return m, nil
+		}
+		m.moveInputCursor(-1)
+		return m, nil
+	case tea.KeyRight:
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
+			return m, nil
+		}
+		m.moveInputCursor(1)
+		return m, nil
+	case tea.KeyHome:
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
+			return m, nil
+		}
+		m.inputCursor = 0
+		return m, nil
+	case tea.KeyEnd:
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
+			return m, nil
+		}
+		m.inputCursor = len([]rune(m.input))
+		return m, nil
+	case tea.KeyBackspace, tea.KeyDelete:
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
+			return m, nil
+		}
+		if !m.deleteInputRuneBackward() {
+			return m, nil
+		}
 		m.clearDiscardWarnings()
 		m.syncSlashCommandUI()
 		return m, nil
 	case tea.KeySpace:
-		if m.stream.active || m.loadingAnalystMessage {
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
 			return m, nil
 		}
-		m.input += " "
+		m.insertInputText(" ")
 		m.clearDiscardWarnings()
 		m.syncSlashCommandUI()
 		return m, nil
 	default:
-		if m.stream.active || m.loadingAnalystMessage {
+		if m.stream.active || m.loadingAnalysisMessage || m.wrapping {
 			return m, nil
 		}
 		if msg.Type == tea.KeyRunes {
-			m.input += string(msg.Runes)
+			m.insertInputText(string(msg.Runes))
 			m.clearDiscardWarnings()
 			m.syncSlashCommandUI()
 		}
@@ -347,12 +396,22 @@ func (m Model) handleModeSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyEnter:
 		return m.selectHighlightedMode()
+	case tea.KeyLeft:
+		m.moveInputCursor(-1)
+		return m, nil
+	case tea.KeyRight:
+		m.moveInputCursor(1)
+		return m, nil
+	case tea.KeyHome:
+		m.inputCursor = 0
+		return m, nil
+	case tea.KeyEnd:
+		m.inputCursor = len([]rune(m.input))
+		return m, nil
 	case tea.KeyBackspace, tea.KeyDelete:
-		if len(m.input) == 0 {
+		if !m.deleteInputRuneBackward() {
 			return m, nil
 		}
-		runes := []rune(m.input)
-		m.input = string(runes[:len(runes)-1])
 		m.clearDiscardWarnings()
 		m.resetModeSelectorIndex()
 		if !m.isModeCommandInput() {
@@ -360,13 +419,13 @@ func (m Model) handleModeSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeySpace:
-		m.input += " "
+		m.insertInputText(" ")
 		m.clearDiscardWarnings()
 		m.resetModeSelectorIndex()
 		return m, nil
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.input += string(msg.Runes)
+			m.insertInputText(string(msg.Runes))
 			m.clearDiscardWarnings()
 			m.resetModeSelectorIndex()
 		}
@@ -375,7 +434,7 @@ func (m Model) handleModeSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startPrompt() (tea.Model, tea.Cmd) {
-	if m.stream.active || m.loadingAnalystMessage || strings.TrimSpace(m.input) == "" {
+	if m.stream.active || m.loadingAnalysisMessage || strings.TrimSpace(m.input) == "" {
 		return m, nil
 	}
 
@@ -394,6 +453,7 @@ func (m Model) startPrompt() (tea.Model, tea.Cmd) {
 	m.pendingPrompt = prompt
 	m.output = ""
 	m.input = ""
+	m.inputCursor = 0
 
 	// Update viewport content and scroll to bottom when starting a new prompt
 	m.updateViewportContent()
@@ -449,6 +509,11 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 	case "/hints":
 		return m.handleHintsCommand()
 	case "/wrap":
+		if !m.currentModePersistsSessions() {
+			m.err = errors.New(text.UnknownCommand(fields[0]))
+			m.statusMessage = ""
+			return m, nil
+		}
 		return m.handleWrapCommand()
 	default:
 		m.err = errors.New(text.UnknownCommand(fields[0]))
@@ -497,15 +562,16 @@ func (m Model) handleWrapCommand() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if err := m.persistCurrentSession(context.Background()); err != nil {
-		m.err = err
+	if !m.currentModePersistsSessions() {
+		m.err = errors.New(text.CannotWrapInThisMode)
 		m.statusMessage = ""
 		return m, nil
 	}
 
 	m.clearDiscardWarnings()
 	m.statusMessage = text.SessionWrapped(m.currentMode.Name)
-	return m, tea.Quit
+	m.wrapping = true
+	return m, m.wrapSession()
 }
 
 func (m Model) selectHighlightedMode() (tea.Model, tea.Cmd) {
@@ -529,12 +595,21 @@ func (m Model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.shouldWarnAboutDiscard() && m.pendingSwitch != mode.ID {
+	discardingUnsavedSession := m.shouldWarnAboutDiscard() && m.pendingSwitch == mode.ID
+	if m.shouldWarnAboutDiscard() && !discardingUnsavedSession {
 		m.pendingQuit = false
 		m.pendingSwitch = mode.ID
 		m.err = nil
 		m.statusMessage = text.UnsavedSessionSwitchWarning(mode.Name)
 		return m, nil
+	}
+
+	if !discardingUnsavedSession {
+		if err := m.persistCurrentSession(context.Background()); err != nil {
+			m.err = err
+			m.statusMessage = ""
+			return m, nil
+		}
 	}
 
 	service, err := agent.NewService(m.client, mode)
@@ -547,7 +622,7 @@ func (m Model) selectHighlightedMode() (tea.Model, tea.Cmd) {
 
 	// Load startup messages BEFORE switching mode to avoid flash
 	var session agent.SessionContext
-	if m.sessionStore != nil && mode.ID == agent.ModeAnalyst {
+	if m.sessionStore != nil && (mode.ID == agent.ModeAnalysis || mode.ID == agent.ModePerformanceReview) {
 		session, _, err = service.LoadSession(context.Background())
 		if err != nil {
 			m.err = err
@@ -577,6 +652,7 @@ func (m *Model) switchToMode(mode agent.Mode, runner *AgentRunner, session agent
 	}
 
 	m.input = ""
+	m.inputCursor = 0
 	m.modeSelector.active = false
 	m.modeSelector.index = 0
 	m.hintsOverlay.active = false
@@ -593,6 +669,7 @@ func (m *Model) switchToMode(mode agent.Mode, runner *AgentRunner, session agent
 	m.stream.doneCh = nil
 	m.startupMessages = startupMessages
 	m.statusMessage = text.SwitchedToMode(mode.Name)
+	m.err = nil
 	m.styles = NewStyles(mode.ID)
 	m.updateViewportContent()
 
@@ -600,11 +677,11 @@ func (m *Model) switchToMode(mode agent.Mode, runner *AgentRunner, session agent
 }
 
 func (m *Model) persistCurrentSession(ctx context.Context) error {
-	if m.sessionStore == nil || m.currentMode.ID != agent.ModeAnalyst {
+	if m.sessionStore == nil || !m.currentModePersistsSessions() {
 		return nil
 	}
 
-	if len(m.session.Recent) == 0 {
+	if len(m.session.WorkingHistory) == 0 {
 		return nil
 	}
 
@@ -620,8 +697,12 @@ func (m *Model) persistCurrentSession(ctx context.Context) error {
 	return m.sessionStore.SaveSession(ctx, m.currentMode.ID, m.session)
 }
 
+func (m Model) currentModePersistsSessions() bool {
+	return m.currentMode.ID == agent.ModeAnalysis || m.currentMode.ID == agent.ModePerformanceReview
+}
+
 func (m Model) shouldWarnAboutDiscard() bool {
-	return m.currentMode.ID == agent.ModeAnalyst && len(m.session.Recent) > 0
+	return m.currentModePersistsSessions() && len(m.session.WorkingHistory) > 0
 }
 
 func (m *Model) warnBeforeDiscardingOnQuit() bool {
@@ -630,6 +711,7 @@ func (m *Model) warnBeforeDiscardingOnQuit() bool {
 	}
 
 	m.pendingQuit = true
+	m.discardOnQuit = true
 	m.pendingSwitch = ""
 	m.err = nil
 	m.statusMessage = text.UnsavedSessionQuitMsg
@@ -657,6 +739,14 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) beginShutdown() (tea.Model, tea.Cmd) {
+	if !m.discardOnQuit {
+		if err := m.persistCurrentSession(context.Background()); err != nil {
+			m.err = err
+			m.statusMessage = ""
+			return m, nil
+		}
+	}
+
 	m.shuttingDown = true
 	m.err = nil
 	m.statusMessage = text.ShuttingDown
@@ -664,6 +754,15 @@ func (m Model) beginShutdown() (tea.Model, tea.Cmd) {
 	m.hintsOverlay.active = false
 	m.updateViewportContent()
 	return m, shutdownCmd(m.shutdownFn)
+}
+
+func (m Model) wrapSession() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.persistCurrentSession(context.Background()); err != nil {
+			return wrapCompleteMsg{err: err}
+		}
+		return wrapCompleteMsg{}
+	}
 }
 
 func shutdownCmd(shutdownFn func() error) tea.Cmd {
@@ -677,6 +776,7 @@ func shutdownCmd(shutdownFn func() error) tea.Cmd {
 
 func (m *Model) clearDiscardWarnings() {
 	m.pendingQuit = false
+	m.discardOnQuit = false
 	m.pendingSwitch = ""
 }
 
@@ -720,6 +820,10 @@ func (m *Model) syncSlashCommandUI() {
 		m.hintsOverlay.active = false
 		m.modeSelector.active = true
 		m.resetModeSelectorIndex()
+	case m.isWrapCommandInput():
+		m.modeSelector.active = false
+		m.modeSelector.index = 0
+		m.hintsOverlay.active = true
 	case m.isHintsCommandInput():
 		m.modeSelector.active = false
 		m.modeSelector.index = 0
@@ -729,6 +833,40 @@ func (m *Model) syncSlashCommandUI() {
 		m.modeSelector.index = 0
 		m.hintsOverlay.active = false
 	}
+}
+
+func (m *Model) insertInputText(text string) {
+	runes := []rune(m.input)
+	cursor := m.clampedInputCursor()
+	inserted := []rune(text)
+
+	updated := append(runes[:cursor:cursor], inserted...)
+	updated = append(updated, runes[cursor:]...)
+
+	m.input = string(updated)
+	m.inputCursor = cursor + len(inserted)
+}
+
+func (m *Model) deleteInputRuneBackward() bool {
+	runes := []rune(m.input)
+	cursor := m.clampedInputCursor()
+	if cursor == 0 || len(runes) == 0 {
+		return false
+	}
+
+	updated := append(runes[:cursor-1:cursor-1], runes[cursor:]...)
+	m.input = string(updated)
+	m.inputCursor = cursor - 1
+	return true
+}
+
+func (m *Model) moveInputCursor(delta int) {
+	m.inputCursor = m.clampedInputCursor() + delta
+	m.inputCursor = max(0, min(m.inputCursor, len([]rune(m.input))))
+}
+
+func (m Model) clampedInputCursor() int {
+	return max(0, min(m.inputCursor, len([]rune(m.input))))
 }
 
 func (m Model) isModeCommandInput() bool {
@@ -742,6 +880,10 @@ func (m Model) isModeCommandInput() bool {
 
 func (m Model) isHintsCommandInput() bool {
 	return firstCommandToken(m.input) == "/hints"
+}
+
+func (m Model) isWrapCommandInput() bool {
+	return m.currentModePersistsSessions() && firstCommandToken(m.input) == "/wrap"
 }
 
 func firstCommandToken(input string) string {
@@ -781,7 +923,6 @@ func (m Model) handleStreamDone(msg agent.StreamResult) (tea.Model, tea.Cmd) {
 	m.err = nil
 
 	hasOutput := strings.TrimSpace(m.output) != ""
-	keepStartupMessages := msg.Canceled && !hasOutput
 
 	if msg.Canceled && !hasOutput && m.pendingPrompt != "" {
 		m.input = m.pendingPrompt
@@ -795,9 +936,6 @@ func (m Model) handleStreamDone(msg agent.StreamResult) (tea.Model, tea.Cmd) {
 	m.pendingPrompt = ""
 	m.output = ""
 	m.clearDiscardWarnings()
-	if !keepStartupMessages {
-		m.startupMessages = nil
-	}
 	m.updateViewportContent()
 
 	return m, nil
